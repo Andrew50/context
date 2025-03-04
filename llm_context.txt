@@ -2,1565 +2,2406 @@
 
 ## Current File
 Here is the file I'm looking at. It might be truncated from above and below and, if so, is centered around my cursor.
-```list.svelte
+```input.svelte
 
 
-```tasks/security.go
+```app/page.svelte
 
 
-```quote.svelte
+```chart.svelte
+
+
+```chartContainer.svelte
+
+
+```watchlist.svelte
 
 
 
 <potential_codebase_context>
 ## Potentially Relevant Code Snippets from the current Codebase
 
-<file>frontend/src/lib/utils/modules/list.svelte</file>
-<!-- screen.svelte -->
-<script lang="ts">
-	import { onMount, onDestroy } from 'svelte';
-	import { writable, get } from 'svelte/store';
-	import { UTCTimestampToESTString } from '$lib/core/timestamp';
+<file>/home/aj/dev/study/frontend/src/lib/utils/popups/input.svelte</file>
+<!-- instance.svelte -->
+<script lang="ts" context="module">
+	import '$lib/core/global.css';
+	import { privateRequest } from '$lib/core/backend';
+	import { get, writable } from 'svelte/store';
+	import { parse } from 'date-fns';
+	import { tick } from 'svelte';
 	import type { Writable } from 'svelte/store';
 	import type { Instance } from '$lib/core/types';
-	import StreamCell from '$lib/utils/stream/streamCell.svelte';
-	import { queryChart } from '$lib/features/chart/interface';
-	import { flagWatchlist } from '$lib/core/stores';
-	import { flagSecurity } from '$lib/utils/flag';
-	import { newAlert } from '$lib/features/alerts/interface';
-	import { queueRequest } from '$lib/core/backend';
-	let longPressTimer: any;
-	export let list: Writable<Instance[]> = writable([]);
-	export let columns: Array<string>;
-	export let parentDelete = (v: Instance) => {};
-	export let formatters: { [key: string]: (value: any) => string } = {};
-	export let expandable = false;
-	export let expandedContent: (item: any) => any = () => null;
-	export let displayNames: { [key: string]: string } = {};
 
-	let selectedRowIndex = -1;
-	let expandedRows = new Set();
+	/**
+	 * Simplified Focus Management Strategy:
+	 * 1. When input component is activated, we store the previously focused element
+	 * 2. We focus the input window itself and handle keyboard events directly
+	 * 3. When input is completed or cancelled, we restore focus to the previously focused element
+	 * 4. We clean up all event listeners when the component is destroyed or deactivated
+	 */
 
-	// Add these for similar trades handling
-	let similarTradesMap = new Map();
-	let loadingMap = new Map();
-	let errorMap = new Map();
+	const allKeys = ['ticker', 'timestamp', 'timeframe', 'extendedHours', 'price'] as const;
+	let currentSecurityResultRequest = 0;
 
-	let iconsMap = new Map();
-
-	function isFlagged(instance: Instance, flagWatch: Instance[]) {
-		if (!Array.isArray(flagWatch)) return false;
-		return flagWatch.some((item) => item.ticker === instance.ticker);
-	}
-
-	function deleteRow(event: MouseEvent, watch: Instance) {
-		event.stopPropagation();
-		event.preventDefault();
-		list.update((v: Instance[]) => {
-			return v.filter((s) => s !== watch);
-		});
-		parentDelete(watch);
-	}
-	function createListAlert() {
-		const alert = {
-			price: get(list)[selectedRowIndex].price
-		};
-		for (let i = 0; i < get(list).length; i++) {
-			alert.securityId = get(list)[i].securityId;
-			alert.ticker = get(list)[i].ticker;
-			newAlert(alert);
-		}
-	}
-	function handleKeydown(event: KeyboardEvent, watch: Instance) {
-		if (event.key === 'ArrowUp' || (event.key === ' ' && event.shiftKey)) {
-			event.preventDefault();
-			moveUp();
-		} else if (event.key === 'ArrowDown' || event.key === ' ') {
-			event.preventDefault();
-			moveDown();
-		} else {
-			return;
-		}
-	}
-	function moveDown() {
-		if (selectedRowIndex < $list.length - 1) {
-			selectedRowIndex++;
-		} else {
-			selectedRowIndex = 0;
-		}
-		scrollToRow(selectedRowIndex);
-	}
-	function moveUp() {
-		if (selectedRowIndex > 0) {
-			selectedRowIndex--;
-		} else {
-			selectedRowIndex = $list.length - 1;
-		}
-		scrollToRow(selectedRowIndex);
-	}
-
-	function scrollToRow(index: number) {
-		const row = document.getElementById(`row-${index}`);
-		if (row) {
-			row.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-			queryChart(get(list)[selectedRowIndex]);
-		}
-	}
-	onMount(async () => {
-		window.addEventListener('keydown', handleKeydown);
-		const preventContextMenu = (event) => {
-			event.preventDefault();
-		};
-
-		window.addEventListener('contextmenu', preventContextMenu);
-
-		// Fetch icons if "Ticker" column is present
-		if (columns.includes('Ticker')) {
-			const tickers = get(list).map((item) => item.ticker);
-			const iconsResponse = await privateRequest('getIcons', { tickers });
-			iconsResponse.forEach((iconData) => {
-				iconsMap.set(iconData.ticker, iconData.icon);
-			});
-		}
-
-		return () => {
-			window.removeEventListener('contextmenu', preventContextMenu);
-		};
+	type InstanceAttributes = (typeof allKeys)[number];
+	let filterOptions = [];
+	let loadedSecurityResultRequest = -1;
+	privateRequest<[]>('getSecurityClassifications', {}).then((v: []) => {
+		filterOptions = v;
 	});
-	onDestroy(() => {
-		window.removeEventListener('keydown', handleKeydown);
-	});
-	function clickHandler(
-		event: MouseEvent,
-		instance: Instance,
-		index: number,
-		force: number | null = null
-	) {
-		let even;
-		if (force !== null) {
-			even = force;
-		} else {
-			even = event.button;
-		}
-		console.log(event);
-		event.preventDefault();
-		event.stopPropagation();
-		if (even === 0) {
-			selectedRowIndex = index;
-			if ('openQuantity' in instance) {
-				queryChart(instance);
-			} else {
-				queryChart(instance);
+	interface InputQuery {
+		// 'inactive': no UI shown
+		// 'initializing' setting up event handlers
+		// 'active': window is open waiting for input
+		// 'complete': one field completed (may still be active if more required)
+		// 'cancelled': user cancelled via Escape
+		// 'shutdown': about to close and reset to inactive
+		status: 'inactive' | 'initializing' | 'active' | 'complete' | 'cancelled' | 'shutdown';
+		inputString: string;
+		inputType: string;
+		inputValid: boolean;
+		instance: Instance;
+		requiredKeys: InstanceAttributes[] | 'any';
+		possibleKeys: InstanceAttributes[];
+		securities?: Instance[];
+	}
+
+	const inactiveInputQuery: InputQuery = {
+		status: 'inactive',
+		inputString: '',
+		inputValid: true,
+		inputType: '',
+		requiredKeys: 'any',
+		possibleKeys: [],
+		instance: {}
+	};
+	export const inputQuery: Writable<InputQuery> = writable({ ...inactiveInputQuery });
+
+	// Hold the reject function of the currently active promise (if any)
+	let activePromiseReject: ((reason?: any) => void) | null = null;
+
+	// Modified queryInstanceInput: if called while another query is active,
+	// cancel the previous query (rejecting its promise) and reset the state.
+	export async function queryInstanceInput(
+		requiredKeys: InstanceAttributes[] | 'any',
+		optionalKeys: InstanceAttributes[] | 'any',
+		instance: Instance = {}
+	): Promise<Instance> {
+		// If an input query is already active, force its cancellation.
+		if (get(inputQuery).status !== 'inactive') {
+			if (activePromiseReject) {
+				activePromiseReject(new Error('User cancelled input'));
+				activePromiseReject = null;
 			}
-		} else if (even === 1) {
-			flagSecurity(instance);
+			inputQuery.update((q) => ({ ...inactiveInputQuery }));
+			// Optionally wait a tick for the UI to update.
+			await tick();
 		}
-	}
-	function handleTouchStart(event, watch, i) {
-		longPressTimer = setTimeout(() => {
-			clickHandler(event, watch, i, 2); // The action you want to trigger
-		}, 600); // Time in milliseconds to consider a long press
-	}
 
-	function handleTouchEnd() {
-		clearTimeout(longPressTimer); // Clear if it's a short tap
-	}
-
-	function toggleRow(index: number) {
-		console.log('Toggling row:', index);
-		if (expandedRows.has(index)) {
-			expandedRows.delete(index);
+		// Determine possible keys.
+		let possibleKeys: InstanceAttributes[];
+		if (optionalKeys === 'any') {
+			possibleKeys = [...allKeys];
 		} else {
-			expandedRows.add(index);
-			// Debug log for expanded content
-			const content = expandedContent($list[index]);
-			console.log('Expanded content:', content);
+			possibleKeys = Array.from(
+				new Set([...requiredKeys, ...optionalKeys])
+			) as InstanceAttributes[];
 		}
-		expandedRows = expandedRows; // Trigger reactivity
-	}
+		await tick();
 
-	function formatValue(value: any, column: string): string {
-		// Convert column name to camelCase
-		const normalizedCol = column
-			.replace(/ /g, '') // Remove spaces
-			.replace(/^[A-Z]/, (letter) => letter.toLowerCase()); // Decapitalize first letter
-
-		// Get the actual data property name based on the display column name
-		let dataKey = normalizedCol;
-		switch (normalizedCol) {
-			case 'chg':
-				dataKey = 'change';
-				break;
-			case 'chg%':
-				dataKey = 'change%';
-				break;
-			case 'ext':
-				dataKey = 'change%extended';
-				break;
-			default:
-				dataKey = normalizedCol;
+		// Check if there's an initial inputString in the instance
+		const initialInputString =
+			'inputString' in instance && instance['inputString'] != null
+				? String(instance['inputString'])
+				: '';
+		// Remove inputString property (not part of the Instance interface)
+		if ('inputString' in instance) {
+			const instanceAny = instance as any;
+			delete instanceAny.inputString;
 		}
 
-		// Get value using the normalized data key
-		const rawValue = value[dataKey];
+		// Initialize the query with passed instance info.
+		inputQuery.update((v: InputQuery) => ({
+			...v,
+			requiredKeys,
+			possibleKeys,
+			instance,
+			inputString: initialInputString, // Use the initial input string if provided
+			status: 'initializing'
+		}));
 
-		if (formatters[column]) {
-			return formatters[column](rawValue);
-		}
-		return rawValue?.toString() ?? 'N/A';
-	}
+		// Return a new promise that resolves when input is complete or rejects on cancellation.
+		return new Promise<Instance>((resolve, reject) => {
+			// Save the reject function so a subsequent call can cancel this query.
+			activePromiseReject = reject;
 
-	function getAllOrders(trade) {
-		return trade.trades || [];
-	}
-
-	async function loadSimilarTrades(tradeId: number) {
-		if (!tradeId) {
-			console.log('No tradeId provided');
-			return;
-		}
-
-		console.log('Loading similar trades for trade:', tradeId);
-		loadingMap.set(tradeId, true);
-		errorMap.delete(tradeId);
-		similarTradesMap = similarTradesMap;
-
-		try {
-			console.log('Making request for trade:', tradeId);
-			const result = await queueRequest('find_similar_trades', { trade_id: tradeId });
-			console.log('Similar trades result:', result);
-
-			if (result.status === 'success') {
-				similarTradesMap.set(tradeId, result.similar_trades);
-				console.log('Updated similarTradesMap:', similarTradesMap);
-			} else {
-				errorMap.set(tradeId, result.message);
-				console.log('Error from server:', result.message);
-			}
-		} catch (e) {
-			console.error('Error loading similar trades:', e);
-			errorMap.set(tradeId, `Error loading similar trades: ${e}`);
-		} finally {
-			loadingMap.delete(tradeId);
-			similarTradesMap = similarTradesMap;
-		}
-	}
-
-	// Modified reactive statement with more logging
-	$: {
-		if (expandedRows) {
-			console.log('Expanded rows changed:', expandedRows);
-			expandedRows.forEach((isExpanded, index) => {
-				console.log(`Checking row ${index}, expanded: ${isExpanded}`);
-				if (isExpanded && $list[index]) {
-					const content = expandedContent($list[index]);
-					console.log(`Content for row ${index}:`, content);
-					if (content?.tradeId) {
-						console.log(`Loading similar trades for row ${index}, tradeId: ${content.tradeId}`);
-						loadSimilarTrades(content.tradeId);
-					}
+			const unsubscribe = inputQuery.subscribe((iQ: InputQuery) => {
+				if (iQ.status === 'cancelled') {
+					cleanup();
+					reject(new Error('User cancelled input'));
+				} else if (iQ.status === 'complete') {
+					const result = iQ.instance;
+					cleanup();
+					resolve(result);
 				}
 			});
-		}
+
+			function cleanup() {
+				unsubscribe();
+				activePromiseReject = null;
+				// Trigger a shutdown to reset state.
+				inputQuery.update((v: InputQuery) => ({ ...v, status: 'shutdown' }));
+			}
+		});
 	}
 </script>
 
-<div class="table-container">
-	<table class="default-table">
-		<thead>
-			<tr class="default-tr">
-				{#if expandable}
-					<th class="default-th expand-column" />
-				{/if}
-				<th class="default-th"></th>
-				{#each columns as col}
-					<th class="default-th">{displayNames[col] || col}</th>
-				{/each}
-				<th class="default-th"></th>
-			</tr>
-		</thead>
-		{#if Array.isArray($list) && $list.length > 0}
-			<tbody>
-				{#each $list as watch, i}
-					<tr
-						class="default-tr"
-						on:mousedown={(event) => clickHandler(event, watch, i)}
-						on:touchstart={handleTouchStart}
-						on:touchend={handleTouchEnd}
-						id="row-{i}"
-						class:selected={i === selectedRowIndex}
-						on:contextmenu={(event) => {
-							event.preventDefault();
-						}}
-						class:expandable
-						class:expanded={expandedRows.has(i)}
-						on:click={() => expandable && toggleRow(i)}
-					>
-						{#if expandable}
-							<td class="default-td expand-cell">
-								<span class="expand-icon">{expandedRows.has(i) ? '−' : '+'}</span>
-							</td>
-						{/if}
-						<td class="default-td">
-							{#if isFlagged(watch, $flagWatchlist)}
-								<span class="flag-icon">⚑</span>
-							{/if}
-						</td>
-						{#each columns as col}
-							{#if col === 'Ticker'}
-								<td class="default-td">
-									{#if iconsMap.has(watch.ticker)}
-										<img src={iconsMap.get(watch.ticker)} alt="icon" class="ticker-icon" />
-									{/if}
-									{watch.ticker}
-								</td>
-							{:else if ['Price', 'Chg', 'Chg%', 'Ext'].includes(col)}
-								<td class="default-td">
-									<StreamCell
-										on:contextmenu={(event) => {
-											event.preventDefault();
-											event.stopPropagation();
-										}}
-										instance={watch}
-										type={(() => {
-											switch (col) {
-												case 'Price':
-													return 'price';
-												case 'Chg':
-													return 'change';
-												case 'Chg%':
-													return 'change %';
-												case 'Ext':
-													return 'change % extended';
-												default:
-													return col.toLowerCase();
-											}
-										})()}
-									/>
-								</td>
-							{:else if col === 'Timestamp'}
-								<td
-									class="default-td"
-									on:contextmenu={(event) => {
-										event.preventDefault();
-										event.stopPropagation();
-									}}>{UTCTimestampToESTString(watch[col.toLowerCase()])}</td
-								>
-							{:else}
-								<td
-									class="default-td"
-									on:contextmenu={(event) => {
-										event.preventDefault();
-										event.stopPropagation();
-									}}>{formatValue(watch, col)}</td
-								>
-							{/if}
-						{/each}
-						<td class="default-td">
-							<button
-								class="delete-button"
-								on:click={(event) => {
-									deleteRow(event, watch);
-								}}
-							>
-								✕
-							</button>
-						</td>
-					</tr>
-					{#if expandable && expandedRows.has(i)}
-						<tr class="expanded-content">
-							<td colspan={columns.length + (expandable ? 2 : 1)}>
-								<div class="trade-details">
-									<h4>Trade Details</h4>
-									<table>
-										<thead>
-											<tr class="defalt-tr">
-												<th class="defalt-th">Time</th>
-												<th class="defalt-th">Type</th>
-												<th class="defalt-th">Price</th>
-												<th class="defalt-th">Shares</th>
-											</tr>
-										</thead>
-										<tbody>
-											{#each getAllOrders(watch) as order}
-												<tr class="defalt-tr">
-													<td class="defalt-td">{UTCTimestampToESTString(order.time)}</td>
-													<td class={order.type.toLowerCase().replace(/\s+/g, '-')}>{order.type}</td
-													>
-													<td class="defalt-td">{order.price}</td>
-													<td class="defalt-td">{order.shares}</td>
-												</tr>
-											{/each}
-										</tbody>
-									</table>
+<script lang="ts">
+	import { browser } from '$app/environment';
+	import { onDestroy, onMount } from 'svelte';
+	import { ESTStringToUTCTimestamp, UTCTimestampToESTString } from '$lib/core/timestamp';
+	
+	// Track the previously focused element
+	let prevFocusedElement: HTMLElement | null = null;
+	let inputWindowElement: HTMLDivElement;
+	let isLoadingSecurities = false;
+	let manualInputType: string = 'auto';
 
-									<!-- Add Similar Trades section -->
-									{#if expandedContent}
-										{@const content = expandedContent($list[i])}
-										{@const tradeId = content.tradeId}
-										{#if tradeId}
-											<h4>Similar Trades</h4>
-											{#if loadingMap.get(tradeId)}
-												<div class="loading">Loading similar trades...</div>
-											{:else if errorMap.get(tradeId)}
-												<div class="error">{errorMap.get(tradeId)}</div>
-											{:else if similarTradesMap.get(tradeId)?.length}
-												<table>
-													<thead>
-														<tr class="defalt-tr">
-															<th class="defalt-th">Date</th>
-															<th class="defalt-th">Ticker</th>
-															<th class="defalt-th">Direction</th>
-															<th class="defalt-th">P/L</th>
-															<th class="defalt-th">Similarity</th>
-														</tr>
-													</thead>
-													<tbody>
-														{#each similarTradesMap.get(tradeId) as similarTrade}
-															<tr class="defalt-tr">
-																<td class="defalt-td">
-																	{UTCTimestampToESTString(similarTrade.entry_time)}
-																</td>
-																<td class="defalt-td">{similarTrade.ticker}</td>
-																<td class="defalt-td">{similarTrade.direction}</td>
-																<td class={similarTrade.pnl >= 0 ? 'positive' : 'negative'}>
-																	${similarTrade.pnl.toFixed(2)}
-																</td>
-																<td class="defalt-td">
-																	{(similarTrade.similarity_score * 100).toFixed(1)}%
-																</td>
-															</tr>
-														{/each}
-													</tbody>
-												</table>
-											{:else}
-												<div class="no-results">No similar trades found</div>
-											{/if}
-										{/if}
-									{/if}
-								</div>
-							</td>
-						</tr>
-					{/if}
-				{/each}
-			</tbody>
-		{/if}
-	</table>
-</div>
+	// Add this reactive statement
+	$: if (manualInputType !== 'auto' && $inputQuery.status === 'active') {
+		inputQuery.update((v) => ({
+			...v,
+			inputType: manualInputType
+		}));
+	}
+
+	interface ValidateResponse {
+		inputValid: boolean;
+		securities: Instance[];
+	}
+
+	async function validateInput(inputString: string, inputType: string): Promise<ValidateResponse> {
+		if (inputType === 'ticker') {
+			isLoadingSecurities = true;
+			try {
+				const securities = await privateRequest<Instance[]>('getSecuritiesFromTicker', {
+					ticker: inputString
+				});
+				if (Array.isArray(securities) && securities.length > 0) {
+					return {
+						inputValid: true,
+						securities: securities
+					};
+				}
+				return { inputValid: false, securities: [] };
+			} finally {
+				isLoadingSecurities = false;
+			}
+		} else if (inputType === 'timeframe') {
+			const regex = /^\d{1,3}[yqmwhds]?$/i;
+			return { inputValid: regex.test(inputString), securities: [] };
+		} else if (inputType === 'timestamp') {
+			const formats = ['yyyy-MM-dd H:m:ss', 'yyyy-MM-dd H:m', 'yyyy-MM-dd H', 'yyyy-MM-dd'];
+			for (const format of formats) {
+				try {
+					const parsedDate = parse(inputString, format, new Date());
+					if (!isNaN(parsedDate.getTime())) {
+						return { inputValid: true, securities: [] };
+					}
+				} catch {
+					/* try next format */
+				}
+			}
+			return { inputValid: false, securities: [] };
+		} else if (inputType === 'price') {
+			const price = parseFloat(inputString);
+			return { inputValid: !isNaN(price) && price > 0, securities: [] };
+		}
+		return { inputValid: false, securities: [] };
+	}
+
+	async function waitForSecurityResult(): Promise<void> {
+		return new Promise((resolve) => {
+			const check = () => {
+				if (loadedSecurityResultRequest === currentSecurityResultRequest) {
+					resolve();
+				} else {
+					// Check again after 50ms (or adjust as needed)
+					setTimeout(check, 50);
+				}
+			};
+			check();
+		});
+	}
+
+	async function enterInput(iQ: InputQuery, tickerIndex: number = 0): Promise<InputQuery> {
+		if (iQ.inputType === 'ticker') {
+			const ts = iQ.instance.timestamp;
+			await waitForSecurityResult();
+			iQ = $inputQuery;
+			if (Array.isArray(iQ.securities) && iQ.securities.length > 0) {
+				iQ.instance = { ...iQ.instance, ...iQ.securities[tickerIndex] };
+				iQ.instance.timestamp = ts;
+			}
+		} else if (iQ.inputType === 'timeframe') {
+			iQ.instance.timeframe = iQ.inputString;
+		} else if (iQ.inputType === 'timestamp') {
+			iQ.instance.timestamp = ESTStringToUTCTimestamp(iQ.inputString);
+		} else if (iQ.inputType === 'price') {
+			iQ.instance.price = parseFloat(iQ.inputString);
+		}
+		// Mark as complete but then check if further input is needed.
+		iQ.status = 'complete';
+		if (iQ.requiredKeys === 'any') {
+			if (Object.keys(iQ.instance).length === 0) {
+				iQ.status = 'active';
+			}
+		} else {
+			for (const attribute of iQ.requiredKeys) {
+				if (!iQ.instance[attribute]) {
+					iQ.status = 'active';
+					break;
+				}
+			}
+		}
+		iQ.inputString = '';
+		iQ.inputType = '';
+		iQ.inputValid = true;
+		// Reset manualInputType to auto after input is entered
+		manualInputType = 'auto';
+		return iQ;
+	}
+
+	// Handle keyboard input directly on the input window
+	async function handleKeyDown(event: KeyboardEvent): Promise<void> {
+		// Get current state directly from the store to ensure we have latest state
+		const currentState = get(inputQuery);
+
+		// Make sure we're in active state
+		if (currentState.status !== 'active') {
+			return;
+		}
+
+		// Always prevent default behavior for our captured keys to avoid browser handling
+		if (
+			event.key === 'Enter' ||
+			event.key === 'Tab' ||
+			event.key === 'Escape' ||
+			/^[a-zA-Z0-9]$/.test(event.key) ||
+			/[-:.]/.test(event.key) ||
+			(event.key === ' ' && currentState.inputType === 'timestamp') ||
+			event.key === 'Backspace'
+		) {
+			event.preventDefault();
+		}
+
+		// Stop propagation to prevent double-handling
+		event.stopPropagation();
+
+		let iQ = { ...currentState };
+		if (event.key === 'Escape') {
+			inputQuery.update((q) => ({ ...q, status: 'cancelled' }));
+			return;
+		} else if (event.key === 'Enter') {
+			if (iQ.inputValid) {
+				const updatedQuery = await enterInput(iQ, 0);
+				inputQuery.set(updatedQuery);
+			}
+			return;
+		} else if (event.key === 'Tab') {
+			inputQuery.update((q) => ({
+				...q,
+				instance: { ...q.instance, extendedHours: !q.instance.extendedHours }
+			}));
+			return;
+		}
+
+		// Process input keys
+		if (
+			/^[a-zA-Z0-9]$/.test(event.key) ||
+			/[-:.]/.test(event.key) ||
+			(event.key === ' ' && iQ.inputType === 'timestamp')
+		) {
+			// Transform the key based on input type
+			const key = iQ.inputType === 'timeframe' ? event.key : event.key.toUpperCase();
+			const newInputString = iQ.inputString + key;
+
+			// Update inputString immediately
+			inputQuery.update((v) => ({
+				...v,
+				inputString: newInputString
+			}));
+
+			// Then determine input type
+			determineInputType(newInputString);
+		} else if (event.key === 'Backspace') {
+			const newInputString = iQ.inputString.slice(0, -1);
+
+			// Update inputString immediately
+			inputQuery.update((v) => ({
+				...v,
+				inputString: newInputString
+			}));
+
+			// Then determine input type
+			determineInputType(newInputString);
+		}
+	}
+
+	function determineInputType(inputString: string): void {
+		const iQ = get(inputQuery);
+		let inputType = iQ.inputType;
+
+		// Only auto-classify if manualInputType is set to 'auto'
+		if (manualInputType === 'auto') {
+			if (inputString !== '') {
+				if (iQ.possibleKeys.includes('ticker') && /^[A-Z]$/.test(inputString)) {
+					inputType = 'ticker';
+				} else if (iQ.possibleKeys.includes('price') && /^(?:\d*\.\d+|\d{3,})$/.test(inputString)) {
+					inputType = 'price';
+				} else if (
+					iQ.possibleKeys.includes('timeframe') &&
+					/^\d{1,2}[hdwmqs]?$/i.test(inputString)
+				) {
+					inputType = 'timeframe';
+				} else if (iQ.possibleKeys.includes('timestamp') && /^[\d-]+$/.test(inputString)) {
+					inputType = 'timestamp';
+				} else if (iQ.possibleKeys.includes('ticker')) {
+					inputType = 'ticker';
+				} else {
+					inputType = '';
+				}
+			} else {
+				inputType = '';
+			}
+		} else {
+			// Use the manually selected input type
+			inputType = manualInputType;
+		}
+
+		// Update the input type
+		inputQuery.update((v) => ({
+			...v,
+			inputType
+		}));
+
+		// Trigger validation
+		currentSecurityResultRequest++;
+		const thisSecurityResultRequest = currentSecurityResultRequest;
+		validateInput(inputString, inputType).then((validationResp: ValidateResponse) => {
+			if (thisSecurityResultRequest === currentSecurityResultRequest) {
+				inputQuery.update((v: InputQuery) => ({
+					...v,
+					...validationResp
+				}));
+				loadedSecurityResultRequest = thisSecurityResultRequest;
+			}
+		});
+	}
+
+	// Handle clicks outside the popup to close it
+	function handleOutsideClick(event: MouseEvent) {
+		const inputWindow = document.getElementById('input-window');
+		if (!inputWindow || !inputWindow.contains(event.target as Node)) {
+			inputQuery.update((v) => ({ ...v, status: 'cancelled' }));
+		}
+	}
+
+	function closeWindow() {
+		inputQuery.update((v) => ({ ...v, status: 'cancelled' }));
+	}
+
+	let sectors: string[] = [];
+	let industries: string[] = [];
+	function capitalize(str: string, lower = false): string {
+		return (lower ? str.toLowerCase() : str).replace(/(?:^|\s|["'([{])+\S/g, (match: string) =>
+			match.toUpperCase()
+		);
+	}
+
+	function formatTimeframe(timeframe: string): string {
+		const match = timeframe.match(/^(\d+)([dwmsh]?)$/i) ?? null;
+		let result = timeframe;
+		if (match) {
+			switch (match[2]) {
+				case 'd':
+					result = `${match[1]} days`;
+					break;
+				case 'w':
+					result = `${match[1]} weeks`;
+					break;
+				case 'm':
+					result = `${match[1]} months`;
+					break;
+				case 'h':
+					result = `${match[1]} hours`;
+					break;
+				case 's':
+					result = `${match[1]} seconds`;
+					break;
+				default:
+					result = `${match[1]} minutes`;
+					break;
+			}
+			if (match[1] === '1') {
+				result = result.slice(0, -1);
+			}
+		}
+		return result;
+	}
+
+	onMount(() => {
+		// Store the currently focused element
+		prevFocusedElement = document.activeElement as HTMLElement;
+
+		const unsubscribe = inputQuery.subscribe((v: InputQuery) => {
+			if (browser) {
+				if (v.status === 'initializing') {
+					// Store focused element before showing the popup
+					prevFocusedElement = document.activeElement as HTMLElement;
+                    
+                    // Mark the UI as active now
+                    inputQuery.update((state) => ({ ...state, status: 'active' }));
+                    
+                    // Focus the input window after it renders
+                    tick().then(() => {
+                        // Focus the input window itself (will receive keyboard events)
+                        if (inputWindowElement) {
+                            inputWindowElement.focus();
+                        }
+                        
+                        // Add a click handler to the document to detect clicks outside the popup
+                        document.addEventListener('mousedown', handleOutsideClick);
+                    });
+				} else if (v.status === 'shutdown' || v.status === 'cancelled') {
+					// Remove document click handler
+					document.removeEventListener('mousedown', handleOutsideClick);
+					
+					// Restore focus to the previously focused element
+					if (prevFocusedElement) {
+                        tick().then(() => {
+                            prevFocusedElement?.focus();
+                            
+                            if (v.status === 'shutdown') {
+                                // Reset to inactive only after focus is restored
+                                inputQuery.update((state) => ({ ...state, status: 'inactive', inputString: '' }));
+                            }
+                        });
+					} else if (v.status === 'shutdown') {
+                        // Reset to inactive if there was no previous element
+                        inputQuery.update((state) => ({ ...state, status: 'inactive', inputString: '' }));
+                    }
+				}
+			}
+		});
+
+		type SecurityClassifications = {
+			sectors: string[];
+			industries: string[];
+		};
+		privateRequest<SecurityClassifications>('getSecurityClassifications', {}, false).then(
+			(classifications: SecurityClassifications) => {
+				sectors = classifications.sectors;
+				industries = classifications.industries;
+			}
+		);
+		
+		return () => {
+			unsubscribe();
+		};
+	});
+
+	onDestroy(() => {
+		// Clean up any remaining event listeners
+		document.removeEventListener('mousedown', handleOutsideClick);
+	});
+	
+	function displayValue(q: InputQuery, key: string): string {
+		if (key === q.inputType) {
+			return q.inputString;
+		} else if (key in q.instance) {
+			if (key === 'timestamp') {
+				return UTCTimestampToESTString(q.instance.timestamp ?? 0);
+			} else if (key === 'extendedHours') {
+				return q.instance.extendedHours ? 'True' : 'False';
+			} else if (key === 'price') {
+				return '$' + String(q.instance.price);
+			} else {
+				return String(q.instance[key as keyof Instance]);
+			}
+		}
+		return '';
+	}
+</script>
+
+{#if $inputQuery.status === 'active' || $inputQuery.status === 'initializing'}
+	<div
+		class="popup-container"
+		id="input-window"
+		bind:this={inputWindowElement}
+		tabindex="0"
+		on:keydown={handleKeyDown}
+	>
+		<div class="header">
+			<div class="title">{capitalize($inputQuery.inputType)} Input</div>
+			<div class="field-select">
+				<span class="label">Field:</span>
+				<select
+					class="default-select"
+					bind:value={manualInputType}
+					on:click|stopPropagation
+					on:change|stopPropagation
+				>
+					<option value="auto">Auto</option>
+					{#each $inputQuery.possibleKeys as key}
+						<option value={key}>{capitalize(key)}</option>
+					{/each}
+				</select>
+			</div>
+			<button class="utility-button" on:click|stopPropagation={closeWindow}>×</button>
+		</div>
+
+		<div class="search-bar">
+			<input type="text" placeholder="Enter Value" value={$inputQuery.inputString} readonly />
+		</div>
+		<div class="content-container">
+			{#if $inputQuery.instance && Object.keys($inputQuery.instance).length > 0}
+				{#if $inputQuery.inputType === ''}
+					<div class="span-container">
+						{#each $inputQuery.possibleKeys as key}
+							<div class="span-row">
+								<span
+									class={$inputQuery.requiredKeys !== 'any' &&
+									$inputQuery.requiredKeys.includes(key) &&
+									!$inputQuery.instance[key]
+										? 'red'
+										: ''}
+								>
+									{capitalize(key)}
+								</span>
+								<span class="value">
+									{displayValue($inputQuery, key)}
+								</span>
+							</div>
+						{/each}
+					</div>
+				{:else if $inputQuery.inputType === 'ticker'}
+					<div class="table-container">
+						{#if isLoadingSecurities}
+							<div class="loading-container">
+								<div class="loading-spinner"></div>
+								<span class="label">Loading securities...</span>
+							</div>
+						{:else if Array.isArray($inputQuery.securities) && $inputQuery.securities.length > 0}
+							<table>
+								<tbody>
+									{#each $inputQuery.securities as sec, i}
+										<tr
+											on:click={async () => {
+												const updatedQuery = await enterInput($inputQuery, i);
+												inputQuery.set(updatedQuery);
+											}}
+										>
+											<td class="defalt-td">
+												<div
+													style="background-color: transparent; width: 100px; height: 30px; display: flex; align-items: center; justify-content: center;"
+												>
+													{#if sec.icon}
+														<img
+															src={`data:image/jpeg;base64,${sec.icon}`}
+															alt="Security Image"
+															style="max-width: 100%; max-height: 100%; object-fit: contain;"
+														/>
+													{/if}
+												</div>
+											</td>
+											<td class="defalt-td">{sec.ticker}</td>
+											<td class="defalt-td">{sec.name}</td>
+											<td class="defalt-td"
+												>{sec.timestamp !== undefined
+													? UTCTimestampToESTString(sec.timestamp)
+													: ''}</td
+											>
+										</tr>
+									{/each}
+								</tbody>
+							</table>
+						{/if}
+					</div>
+				{:else if $inputQuery.inputType === 'timestamp'}
+					<div class="span-container">
+						<div class="span-row">
+							<span class="label">Timestamp</span>
+							<input
+								type="datetime-local"
+								on:change={(e) => {
+									// Use type casting in a different way that works better with Svelte compiler
+									const target = e.target;
+									const inputValue = target && 'value' in target ? String(target.value) : '';
+									const date = new Date(inputValue);
+									inputQuery.update((q) => ({
+										...q,
+										instance: {
+											...q.instance,
+											timestamp: !isNaN(date.getTime()) ? date.getTime() : q.instance.timestamp
+										},
+										inputValid: !isNaN(date.getTime())
+									}));
+								}}
+							/>
+						</div>
+					</div>
+				{:else if $inputQuery.inputType === 'timeframe'}
+					<div class="span-container">
+						<div class="span-row">
+							<span class="label">Timeframe</span>
+							<span class="value">{formatTimeframe($inputQuery.inputString)}</span>
+						</div>
+					</div>
+				{:else if $inputQuery.inputType === 'extendedHours'}
+					<div class="span-container">
+						<div class="span-row">
+							<span class="label">Extended Hours</span>
+							<span class="value">{$inputQuery.instance.extendedHours ? 'True' : 'False'}</span>
+						</div>
+					</div>
+					0
+				{/if}
+			{/if}
+		</div>
+	</div>
+{/if}
 
 <style>
-	.selected {
-		outline: 2px solid var(--ui-accent);
-		outline-offset: -2px;
-	}
-
-	tr {
-		transition: outline 0.2s ease;
-	}
-
-	.list-container {
-		width: 100%;
-		overflow-x: auto;
-	}
-
-	table {
-		width: 100%;
-		border-collapse: collapse;
-		margin: 0;
-		padding: 0;
-		color: var(--text-primary);
+	.popup-container {
+		width: 700px;
+		height: 600px;
 		background: var(--ui-bg-primary);
-		table-layout: fixed;
+		border: 1px solid var(--ui-border);
+		border-radius: 8px;
+		display: flex;
+		flex-direction: column;
+		overflow: hidden;
+		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+		position: fixed;
+		top: 50%;
+		left: 50%;
+		transform: translate(-50%, -50%);
+		z-index: 9999;
+	}
+	.span-container {
+		display: felx;
+		flex-direction: column;
+		gap: 8px;
+		width: 100%;
+	}
+	.span-container span {
+		align-items: top;
+		display: block;
+		flex-direction: row;
+		width: 100%;
+		font-size: 30px;
+	}
+	.span-row {
+		/* Each row is a flex container, left label and right value */
+		display: flex;
+		flex-direction: row;
+		justify-content: space-between;
+		/* optionally align items on the baseline or center */
+		align-items: baseline;
 	}
 
-	th,
-	td {
-		padding: 8px;
-		text-align: left;
+	.span-row span {
+		/* Let it inherit the global font instead of forcing a size */
+		font-size: inherit;
+	}
+
+	.header {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		padding: 8px 12px;
 		border-bottom: 1px solid var(--ui-border);
+		height: 40px;
 	}
 
-	th {
-		background-color: var(--ui-bg-element);
-		font-weight: bold;
-		color: var(--text-secondary);
+	.title {
+		font-size: 16px;
+		font-weight: 500;
+		color: var(--text-primary);
 	}
 
-	tr {
-		background-color: var(--ui-bg-primary);
-		transition: background-color 0.2s;
+	.search-bar {
+		padding: 8px 12px;
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		border-bottom: 1px solid var(--ui-border);
+		height: 48px;
+		position: relative;
 	}
 
-	tr:hover {
-		background-color: var(--ui-bg-hover);
-	}
-
-	.expandable {
-		cursor: pointer;
-	}
-
-	.expand-cell {
-		width: 30px;
-		text-align: center;
-		padding: 4px;
-	}
-
-	.expand-icon {
-		color: var(--text-secondary);
-	}
-
-	.expanded-content {
-		background-color: var(--ui-bg-element);
-	}
-
-	.expanded-content td {
-		padding: 8px;
-	}
-
-	.trade-details {
-		background-color: var(--ui-bg-element);
-		padding: 8px;
+	.search-bar input {
+		flex: 1;
+		background: var(--ui-bg-element);
+		border: 1px solid var(--ui-border);
+		padding: 6px 10px;
+		color: var(--text-primary);
 		border-radius: 4px;
 	}
 
-	.trade-details h4 {
-		margin: 0 0 6px 0;
+	.search-icon {
 		color: var(--text-secondary);
+	}
+
+	.filters {
+		padding: 4px 8px;
+		display: flex;
+		gap: 4px;
+		flex-wrap: wrap;
+		border-bottom: 1px solid var(--ui-border);
+		height: auto;
+		max-height: 80px;
+		overflow-y: auto;
+	}
+
+	.filter-bubble {
+		background: transparent;
+		border: 1px solid var(--ui-border);
+		color: var(--text-secondary);
+		padding: 2px 8px;
+		border-radius: 8px;
+		font-size: 10px;
+		cursor: pointer;
+		transition: all 0.2s;
+	}
+
+	.filter-bubble.active {
+		background: var(--ui-accent);
+		border-color: var(--ui-accent);
+		color: var(--text-primary);
+	}
+
+	.content-container {
+		flex: 1;
+		overflow-y: auto;
+		padding: 12px;
+	}
+
+	.field-select {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin-left: auto;
+	}
+
+	.field-select span {
+		color: var(--text-secondary);
+		font-size: 14px;
+	}
+	
+	.loading-spinner {
+		width: 30px;
+		height: 30px;
+		border: 3px solid var(--ui-border);
+		border-top: 3px solid var(--text-primary);
+		border-radius: 50%;
+		animation: spin 1s linear infinite;
+		margin-bottom: 10px;
+	}
+	.security-item {
+		display: flex;
+		align-items: center;
+		padding: 8px 12px;
+		cursor: pointer;
+		border-bottom: 1px solid var(--ui-border);
+		height: 40px;
+	}
+
+	.security-item:hover {
+		background: var(--ui-bg-hover);
+	}
+
+	.security-icon {
+		margin-right: 12px;
+		width: 24px;
+		height: 24px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.security-icon img {
+		width: 28px;
+		height: 28px;
+		object-fit: contain;
+	}
+
+	.security-info {
+		flex: 1;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		gap: 12px;
+	}
+
+	.security-main {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		flex: 1;
+	}
+
+	.ticker {
+		font-weight: 600;
+		color: var(--text-primary);
+		min-width: 60px;
 		font-size: 0.9em;
 	}
 
-	.trade-details table {
-		width: 100%;
+	.name {
+		color: var(--text-secondary);
 		font-size: 0.85em;
-	}
-
-	.trade-details th {
-		background-color: var(--ui-bg-element);
-		padding: 6px 8px;
-	}
-
-	.trade-details tr {
-		background-color: transparent;
-	}
-
-	.trade-details tr:hover {
-		background-color: var(--ui-bg-hover);
-	}
-
-	.entry,
-	.buy {
-		color: var(--positive);
-	}
-
-	.exit,
-	.sell {
-		color: var(--negative);
-	}
-
-	.short {
-		color: var(--negative);
-	}
-
-	.buy-to-cover {
-		color: var(--positive);
-	}
-
-	.table-container {
-		width: 100%;
+		flex: 1;
+		white-space: nowrap;
 		overflow: hidden;
-		max-width: 100%;
-		padding-bottom: 2px;
-		padding-right: 8px;
+		text-overflow: ellipsis;
 	}
 
-	td:last-child {
-		position: sticky;
-		right: 8px;
-		width: 24px;
-		max-width: 24px;
-		padding: 0;
-		text-align: center;
-	}
-
-	th:last-child {
-		position: sticky;
-		right: 8px;
-		width: 24px;
-		max-width: 24px;
-		padding: 0;
-		background-color: var(--ui-bg-element);
-	}
-
-	.delete-button {
-		opacity: 0;
-		transition: opacity 0.2s ease;
-	}
-
-	tr:hover .delete-button {
-		opacity: 1;
-	}
-
-	tr:hover td {
-		background-color: var(--ui-bg-hover);
-	}
-
-	tr:hover td:last-child {
-		background-color: var(--ui-bg-hover);
-	}
-
-	.loading,
-	.error,
-	.no-results {
-		padding: 10px;
-		text-align: center;
+	.security-details {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		flex: 1;
 		color: var(--text-secondary);
+		font-size: 0.8em;
+		margin-left: auto;
 	}
 
-	.error {
-		color: var(--negative);
-	}
-
-	.positive {
-		color: var(--positive);
-	}
-
-	.negative {
-		color: var(--negative);
-	}
-
-	h4 {
-		margin: 20px 0 10px 0;
+	.sector {
 		color: var(--text-secondary);
+		font-size: 0.8em;
+		margin-right: 8px;
 	}
 
-	.ticker-icon {
-		width: 20px;
-		height: 20px;
-		margin-right: 5px;
-		vertical-align: middle;
+	.exchange {
+		color: var(--text-secondary);
+		font-size: 0.8em;
+		min-width: 50px;
+	}
+
+	.date {
+		color: var(--text-secondary);
+		align-items: center;
+		justify-content: center;
+		padding: 20px;
 	}
 </style>
 
 
-<file>backend/tasks/security.go</file>
-package tasks
+<file>/home/aj/dev/study/frontend/src/lib/utils/popups/input.svelte</file>
+<!-- instance.svelte -->
+<script lang="ts" context="module">
+	import '$lib/core/global.css';
+	import { privateRequest } from '$lib/core/backend';
+	import { get, writable } from 'svelte/store';
+	import { parse } from 'date-fns';
+	import { tick } from 'svelte';
+	import type { Writable } from 'svelte/store';
+	import type { Instance } from '$lib/core/types';
 
-import (
-	"backend/utils"
-	"context"
-	"database/sql"
-	"encoding/base64"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
-	"strings"
-	"time"
+	/**
+	 * Simplified Focus Management Strategy:
+	 * 1. When input component is activated, we store the previously focused element
+	 * 2. We focus the input window itself and handle keyboard events directly
+	 * 3. When input is completed or cancelled, we restore focus to the previously focused element
+	 * 4. We clean up all event listeners when the component is destroyed or deactivated
+	 */
 
-	"github.com/jackc/pgx/v4"
-)
+	const allKeys = ['ticker', 'timestamp', 'timeframe', 'extendedHours', 'price'] as const;
+	let currentSecurityResultRequest = 0;
 
-type GetCurrentTickerArgs struct {
-	SecurityId int `json:"securityId"`
-}
-
-func GetCurrentTicker(conn *utils.Conn, userId int, rawArgs json.RawMessage) (interface{}, error) {
-	var args GetCurrentTickerArgs
-	if err := json.Unmarshal(rawArgs, &args); err != nil {
-		return nil, fmt.Errorf("di1n0fni0: %v", err)
-	}
-	var ticker string
-	err := conn.DB.QueryRow(context.Background(), "SELECT ticker FROM securities WHERE securityid=$1 AND maxDate is NULL", args.SecurityId).Scan(&ticker)
-	if err == pgx.ErrNoRows {
-		return "delisted", nil
-	} else if err != nil {
-		return nil, fmt.Errorf("k01n0v0e: %v", err)
-	}
-	return ticker, nil
-}
-
-type GetMarketCapArgs struct {
-	Ticker string `json:"ticker"`
-}
-
-type GetMarketCapResults struct {
-	MarketCap int `json:"marketCap"`
-}
-
-func GetMarketCap(conn *utils.Conn, userId int, rawArgs json.RawMessage) (interface{}, error) {
-	var args GetMarketCapArgs
-	if err := json.Unmarshal(rawArgs, &args); err != nil {
-		return nil, fmt.Errorf("di1n0fni0: %v", err)
+	type InstanceAttributes = (typeof allKeys)[number];
+	let filterOptions = [];
+	let loadedSecurityResultRequest = -1;
+	privateRequest<[]>('getSecurityClassifications', {}).then((v: []) => {
+		filterOptions = v;
+	});
+	interface InputQuery {
+		// 'inactive': no UI shown
+		// 'initializing' setting up event handlers
+		// 'active': window is open waiting for input
+		// 'complete': one field completed (may still be active if more required)
+		// 'cancelled': user cancelled via Escape
+		// 'shutdown': about to close and reset to inactive
+		status: 'inactive' | 'initializing' | 'active' | 'complete' | 'cancelled' | 'shutdown';
+		inputString: string;
+		inputType: string;
+		inputValid: boolean;
+		instance: Instance;
+		requiredKeys: InstanceAttributes[] | 'any';
+		possibleKeys: InstanceAttributes[];
+		securities?: Instance[];
 	}
 
-	details, err := utils.GetTickerDetails(conn.Polygon, args.Ticker, "now")
-	if err != nil {
-		return nil, fmt.Errorf("k01n0v0e: %v", err)
-	}
+	const inactiveInputQuery: InputQuery = {
+		status: 'inactive',
+		inputString: '',
+		inputValid: true,
+		inputType: '',
+		requiredKeys: 'any',
+		possibleKeys: [],
+		instance: {}
+	};
+	export const inputQuery: Writable<InputQuery> = writable({ ...inactiveInputQuery });
 
-	if details.MarketCap == 0 {
-		return GetMarketCapResults{MarketCap: 0}, nil
-	}
+	// Hold the reject function of the currently active promise (if any)
+	let activePromiseReject: ((reason?: any) => void) | null = null;
 
-	return GetMarketCapResults{MarketCap: int(details.MarketCap)}, nil
-}
-
-type GetPrevCloseArgs struct {
-	SecurityId int `json:"securityId"`
-	Timestamp  int `json:"timestamp"`
-}
-
-type PolygonBar struct {
-	Close float64 `json:"close"`
-}
-
-func GetPrevClose(conn *utils.Conn, userId int, rawArgs json.RawMessage) (interface{}, error) {
-	var args GetPrevCloseArgs
-	if err := json.Unmarshal(rawArgs, &args); err != nil {
-		return nil, fmt.Errorf("getPrevClose invalid args: %v", err)
-	}
-
-	// Start at the given timestamp and subtract a day until a valid close is found
-	currentDay := time.Unix(int64(args.Timestamp/1000), 0).UTC()
-	currentDay = currentDay.AddDate(0, 0, -1)
-
-	var bar PolygonBar
-	var ticker string
-	maxDaysToCheck := 10
-	daysChecked := 0
-	for daysChecked < maxDaysToCheck {
-		// Check if it's a weekend (Saturday or Sunday)
-		if currentDay.Weekday() == time.Saturday || currentDay.Weekday() == time.Sunday {
-			// If it's a weekend, subtract another day
-			currentDay = currentDay.AddDate(0, 0, -1)
-			continue
+	// Modified queryInstanceInput: if called while another query is active,
+	// cancel the previous query (rejecting its promise) and reset the state.
+	export async function queryInstanceInput(
+		requiredKeys: InstanceAttributes[] | 'any',
+		optionalKeys: InstanceAttributes[] | 'any',
+		instance: Instance = {}
+	): Promise<Instance> {
+		// If an input query is already active, force its cancellation.
+		if (get(inputQuery).status !== 'inactive') {
+			if (activePromiseReject) {
+				activePromiseReject(new Error('User cancelled input'));
+				activePromiseReject = null;
+			}
+			inputQuery.update((q) => ({ ...inactiveInputQuery }));
+			// Optionally wait a tick for the UI to update.
+			await tick();
 		}
 
-		// Format the current day as yyyy-mm-dd
-		date := currentDay.Format("2006-01-02")
-
-		// Query the ticker for the given securityId and date range
-		query := `SELECT ticker FROM securities WHERE securityid=$1 AND (minDate <= $2 AND (maxDate IS NULL or maxDate >= $2))`
-		err := conn.DB.QueryRow(context.Background(), query, args.SecurityId, date).Scan(&ticker)
-		if err != nil {
-			return nil, fmt.Errorf("failed to retrieve ticker: %v", err)
-		}
-
-		// Make a request to Polygon's API for that date and ticker
-		endpoint := fmt.Sprintf("https://api.polygon.io/v1/open-close/%s/%s?adjusted=true&apiKey=%s", ticker, date, conn.PolygonKey)
-		resp, err := http.Get(endpoint)
-		if err != nil {
-			return nil, fmt.Errorf("failed to fetch Polygon snapshot: %v", err)
-		}
-		defer resp.Body.Close()
-
-		// Read the response body
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read response: %v", err)
-		}
-
-		// Unmarshal the response into a PolygonBar struct
-		if err := json.Unmarshal(body, &bar); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal JSON: %v", err)
-		}
-
-		// If the close price is found, return it
-		if bar.Close != 0 {
-			fmt.Println(currentDay)
-			return bar.Close, nil
-		}
-
-		// If not a valid market day (e.g., holiday or no trading), go back one day
-		currentDay = currentDay.AddDate(0, 0, -1)
-		daysChecked++
-	}
-	return nil, fmt.Errorf("dn10vn20")
-
-}
-
-type GetSecurityFromTickerArgs struct {
-	Ticker string `json:"ticker"`
-}
-
-type GetSecurityFromTickerResults struct {
-	SecurityId int    `json:"securityId"`
-	Ticker     string `json:"ticker"`
-	Timestamp  int64  `json:"timestamp"`
-	Icon       string `json:"icon"`
-	Name       string `json:"name"`
-}
-
-func GetSecuritiesFromTicker(conn *utils.Conn, userId int, rawArgs json.RawMessage) (interface{}, error) {
-	var args GetSecurityFromTickerArgs
-	if err := json.Unmarshal(rawArgs, &args); err != nil {
-		return nil, fmt.Errorf("getAnnotations invalid args: %v", err)
-	}
-
-	// Clean and prepare the search query
-	query := strings.ToUpper(strings.TrimSpace(args.Ticker))
-
-	// Modified query to properly handle name and icon and prioritize active securities
-	sqlQuery := `
-	WITH ranked_results AS (
-		SELECT DISTINCT ON (s.ticker) 
-			securityId, 
-			ticker,
-			NULLIF(name, '') as name,
-			NULLIF(icon, '') as icon, 
-			maxDate,
-			CASE 
-				WHEN UPPER(ticker) = UPPER($1) THEN 1
-				WHEN UPPER(ticker) LIKE UPPER($1) || '%' THEN 2
-				WHEN UPPER(ticker) LIKE '%' || UPPER($1) || '%' THEN 3
-				ELSE 4
-			END as match_type,
-			similarity(UPPER(ticker), UPPER($1)) as sim_score,
-			CASE 
-				WHEN maxDate IS NULL THEN 0
-				ELSE 1
-			END as is_delisted
-		FROM securities s
-		WHERE (
-			UPPER(ticker) = UPPER($1) OR
-			UPPER(ticker) LIKE UPPER($1) || '%' OR 
-			UPPER(ticker) LIKE '%' || UPPER($1) || '%' OR
-			similarity(UPPER(ticker), UPPER($1)) > 0.3
-		)
-		ORDER BY ticker, maxDate DESC NULLS FIRST
-	)
-	SELECT securityId, ticker, name, icon, maxDate
-	FROM ranked_results
-	ORDER BY match_type, is_delisted, sim_score DESC
-	LIMIT 10
-	`
-
-	rows, err := conn.DB.Query(context.Background(), sqlQuery, query)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var securities []GetSecurityFromTickerResults
-	for rows.Next() {
-		var security GetSecurityFromTickerResults
-		var timestamp sql.NullTime
-		var name, icon sql.NullString
-		if err := rows.Scan(&security.SecurityId, &security.Ticker, &name, &icon, &timestamp); err != nil {
-			return nil, err
-		}
-		if timestamp.Valid {
-			security.Timestamp = timestamp.Time.UnixMilli()
+		// Determine possible keys.
+		let possibleKeys: InstanceAttributes[];
+		if (optionalKeys === 'any') {
+			possibleKeys = [...allKeys];
 		} else {
-			security.Timestamp = 0
+			possibleKeys = Array.from(
+				new Set([...requiredKeys, ...optionalKeys])
+			) as InstanceAttributes[];
 		}
-		// Properly assign name and icon from NullString
-		security.Name = name.String
-		security.Icon = icon.String
-		securities = append(securities, security)
-	}
-	return securities, nil
-}
+		await tick();
 
-type GetTickerDetailsArgs struct {
-	SecurityId int    `json:"securityId"`
-	Ticker     string `json:"ticker,omitempty"`
-	Timestamp  int64  `json:"timestamp,omitempty"`
-}
-
-type GetTickerMenuDetailsResults struct {
-	Ticker                      string          `json:"ticker"`
-	Name                        sql.NullString  `json:"name"`
-	Market                      sql.NullString  `json:"market"`
-	Locale                      sql.NullString  `json:"locale"`
-	PrimaryExchange             sql.NullString  `json:"primary_exchange"`
-	Active                      string          `json:"active"`
-	MarketCap                   sql.NullFloat64 `json:"market_cap"`
-	Description                 sql.NullString  `json:"description"`
-	Logo                        sql.NullString  `json:"logo"`
-	Icon                        sql.NullString  `json:"icon"`
-	ShareClassSharesOutstanding sql.NullInt64   `json:"share_class_shares_outstanding"`
-	Industry                    sql.NullString  `json:"industry"`
-	Sector                      sql.NullString  `json:"sector"`
-	TotalShares                 sql.NullInt64   `json:"totalShares"`
-}
-
-func GetTickerMenuDetails(conn *utils.Conn, userId int, rawArgs json.RawMessage) (interface{}, error) {
-	var args GetTickerDetailsArgs
-	if err := json.Unmarshal(rawArgs, &args); err != nil {
-		return nil, fmt.Errorf("invalid args: %v", err)
-	}
-
-	// Modified query to handle NULL market_cap
-	query := `
-		SELECT 
-			ticker,
-			NULLIF(name, '') as name,
-			NULLIF(market, '') as market,
-			NULLIF(locale, '') as locale,
-			NULLIF(primary_exchange, '') as primary_exchange,
-			CASE 
-				WHEN maxDate IS NULL THEN 'Now'
-				ELSE to_char(maxDate, 'YYYY-MM-DD')
-			END as active,
-			NULLIF(market_cap, 0),  -- This will convert 0 to NULL
-			NULLIF(description, '') as description,
-			NULLIF(logo, '') as logo,
-			NULLIF(icon, '') as icon,
-			share_class_shares_outstanding,
-			NULLIF(industry, '') as industry,
-			NULLIF(sector, '') as sector,
-			total_shares
-		FROM securities 
-		WHERE securityId = $1 AND (maxDate IS NULL OR maxDate = (
-			SELECT MAX(maxDate) 
-			FROM securities 
-			WHERE securityId = $1
-		))`
-
-	var results GetTickerMenuDetailsResults
-	err := conn.DB.QueryRow(context.Background(), query, args.SecurityId).Scan(
-		&results.Ticker,
-		&results.Name,
-		&results.Market,
-		&results.Locale,
-		&results.PrimaryExchange,
-		&results.Active,
-		&results.MarketCap,
-		&results.Description,
-		&results.Logo,
-		&results.Icon,
-		&results.ShareClassSharesOutstanding,
-		&results.Industry,
-		&results.Sector,
-		&results.TotalShares,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get ticker details: %v", err)
-	}
-
-	// Create a map to store the results and handle NULL values
-	response := map[string]interface{}{
-		"ticker":                         results.Ticker,
-		"name":                           results.Name.String,
-		"market":                         results.Market.String,
-		"locale":                         results.Locale.String,
-		"primary_exchange":               results.PrimaryExchange.String,
-		"active":                         results.Active,
-		"market_cap":                     nil,
-		"description":                    results.Description.String,
-		"logo":                           results.Logo.String,
-		"icon":                           results.Icon.String,
-		"share_class_shares_outstanding": nil,
-		"industry":                       results.Industry.String,
-		"sector":                         results.Sector.String,
-		"totalShares":                    nil,
-	}
-
-	// Only include market_cap if it's valid
-	if results.MarketCap.Valid {
-		response["market_cap"] = results.MarketCap.Float64
-	}
-
-	// Only include totalShares if it's valid
-	if results.TotalShares.Valid {
-		response["totalShares"] = results.TotalShares.Int64
-	}
-
-	// Only include share_class_shares_outstanding if it's valid
-	if results.ShareClassSharesOutstanding.Valid {
-		response["share_class_shares_outstanding"] = results.ShareClassSharesOutstanding.Int64
-	}
-
-	return response, nil
-}
-
-type TickerDetailsResponse struct {
-	Ticker                      string  `json:"ticker"`
-	Name                        string  `json:"name"`
-	Market                      string  `json:"market"`
-	Locale                      string  `json:"locale"`
-	PrimaryExchange             string  `json:"primary_exchange"`
-	Active                      bool    `json:"active"`
-	MarketCap                   float64 `json:"market_cap"`
-	Description                 string  `json:"description"`
-	Logo                        string  `json:"logo"`
-	Icon                        string  `json:"icon"`
-	ShareClassSharesOutstanding int64   `json:"share_class_shares_outstanding"`
-	Industry                    string  `json:"industry"`
-	Sector                      string  `json:"sector"`
-}
-
-func GetTickerDetails(conn *utils.Conn, userId int, rawArgs json.RawMessage) (interface{}, error) {
-	var args GetTickerDetailsArgs
-	if err := json.Unmarshal(rawArgs, &args); err != nil {
-		return nil, fmt.Errorf("invalid args: %v", err)
-	}
-	tim := time.UnixMilli(args.Timestamp)
-
-	var ticker string
-	var err error
-	if args.Ticker == "" {
-		ticker, err = utils.GetTicker(conn, args.SecurityId, tim)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get ticker: %s: %v", args.Ticker, err)
-		}
-	} else {
-		ticker = args.Ticker
-	}
-	details, err := utils.GetTickerDetails(conn.Polygon, ticker, "now")
-	if err != nil {
-		fmt.Println("failed to get ticker details: %v", err)
-		return nil, nil
-		//return nil, fmt.Errorf("failed to get ticker details: %v", err)
-	}
-
-	var sector, industry string
-	err = conn.DB.QueryRow(context.Background(), `SELECT sector, industry from securities 
-    where securityId = $1 and maxDate is NULL`, args.SecurityId).Scan(&sector, &industry)
-	if err != nil {
-		return nil, fmt.Errorf("01if0d %v", err)
-	}
-
-	// Helper function to fetch and encode image data
-	fetchImage := func(url string) (string, error) {
-		if url == "" {
-			return "", nil
+		// Check if there's an initial inputString in the instance
+		const initialInputString =
+			'inputString' in instance && instance['inputString'] != null
+				? String(instance['inputString'])
+				: '';
+		// Remove inputString property (not part of the Instance interface)
+		if ('inputString' in instance) {
+			const instanceAny = instance as any;
+			delete instanceAny.inputString;
 		}
 
-		client := &http.Client{}
-		req, err := http.NewRequest("GET", url, nil)
-		if err != nil {
-			return "", fmt.Errorf("failed to create request: %v", err)
+		// Initialize the query with passed instance info.
+		inputQuery.update((v: InputQuery) => ({
+			...v,
+			requiredKeys,
+			possibleKeys,
+			instance,
+			inputString: initialInputString, // Use the initial input string if provided
+			status: 'initializing'
+		}));
+
+		// Return a new promise that resolves when input is complete or rejects on cancellation.
+		return new Promise<Instance>((resolve, reject) => {
+			// Save the reject function so a subsequent call can cancel this query.
+			activePromiseReject = reject;
+
+			const unsubscribe = inputQuery.subscribe((iQ: InputQuery) => {
+				if (iQ.status === 'cancelled') {
+					cleanup();
+					reject(new Error('User cancelled input'));
+				} else if (iQ.status === 'complete') {
+					const result = iQ.instance;
+					cleanup();
+					resolve(result);
+				}
+			});
+
+			function cleanup() {
+				unsubscribe();
+				activePromiseReject = null;
+				// Trigger a shutdown to reset state.
+				inputQuery.update((v: InputQuery) => ({ ...v, status: 'shutdown' }));
+			}
+		});
+	}
+</script>
+
+<script lang="ts">
+	import { browser } from '$app/environment';
+	import { onDestroy, onMount } from 'svelte';
+	import { ESTStringToUTCTimestamp, UTCTimestampToESTString } from '$lib/core/timestamp';
+	
+	// Track the previously focused element
+	let prevFocusedElement: HTMLElement | null = null;
+	let inputWindowElement: HTMLDivElement;
+	let isLoadingSecurities = false;
+	let manualInputType: string = 'auto';
+
+	// Add this reactive statement
+	$: if (manualInputType !== 'auto' && $inputQuery.status === 'active') {
+		inputQuery.update((v) => ({
+			...v,
+			inputType: manualInputType
+		}));
+	}
+
+	interface ValidateResponse {
+		inputValid: boolean;
+		securities: Instance[];
+	}
+
+	async function validateInput(inputString: string, inputType: string): Promise<ValidateResponse> {
+		if (inputType === 'ticker') {
+			isLoadingSecurities = true;
+			try {
+				const securities = await privateRequest<Instance[]>('getSecuritiesFromTicker', {
+					ticker: inputString
+				});
+				if (Array.isArray(securities) && securities.length > 0) {
+					return {
+						inputValid: true,
+						securities: securities
+					};
+				}
+				return { inputValid: false, securities: [] };
+			} finally {
+				isLoadingSecurities = false;
+			}
+		} else if (inputType === 'timeframe') {
+			const regex = /^\d{1,3}[yqmwhds]?$/i;
+			return { inputValid: regex.test(inputString), securities: [] };
+		} else if (inputType === 'timestamp') {
+			const formats = ['yyyy-MM-dd H:m:ss', 'yyyy-MM-dd H:m', 'yyyy-MM-dd H', 'yyyy-MM-dd'];
+			for (const format of formats) {
+				try {
+					const parsedDate = parse(inputString, format, new Date());
+					if (!isNaN(parsedDate.getTime())) {
+						return { inputValid: true, securities: [] };
+					}
+				} catch {
+					/* try next format */
+				}
+			}
+			return { inputValid: false, securities: [] };
+		} else if (inputType === 'price') {
+			const price = parseFloat(inputString);
+			return { inputValid: !isNaN(price) && price > 0, securities: [] };
 		}
-		req.Header.Add("Authorization", "Bearer "+conn.PolygonKey)
+		return { inputValid: false, securities: [] };
+	}
 
-		resp, err := client.Do(req)
-		if err != nil {
-			return "", fmt.Errorf("failed to fetch image: %v", err)
+	async function waitForSecurityResult(): Promise<void> {
+		return new Promise((resolve) => {
+			const check = () => {
+				if (loadedSecurityResultRequest === currentSecurityResultRequest) {
+					resolve();
+				} else {
+					// Check again after 50ms (or adjust as needed)
+					setTimeout(check, 50);
+				}
+			};
+			check();
+		});
+	}
+
+	async function enterInput(iQ: InputQuery, tickerIndex: number = 0): Promise<InputQuery> {
+		if (iQ.inputType === 'ticker') {
+			const ts = iQ.instance.timestamp;
+			await waitForSecurityResult();
+			iQ = $inputQuery;
+			if (Array.isArray(iQ.securities) && iQ.securities.length > 0) {
+				iQ.instance = { ...iQ.instance, ...iQ.securities[tickerIndex] };
+				iQ.instance.timestamp = ts;
+			}
+		} else if (iQ.inputType === 'timeframe') {
+			iQ.instance.timeframe = iQ.inputString;
+		} else if (iQ.inputType === 'timestamp') {
+			iQ.instance.timestamp = ESTStringToUTCTimestamp(iQ.inputString);
+		} else if (iQ.inputType === 'price') {
+			iQ.instance.price = parseFloat(iQ.inputString);
 		}
-		defer resp.Body.Close()
-
-		imageData, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return "", fmt.Errorf("failed to read image data: %v", err)
-		}
-
-		return base64.StdEncoding.EncodeToString(imageData), nil
-	}
-
-	// Fetch both logo and icon
-
-	logoBase64, err := fetchImage(details.Branding.LogoURL)
-	iconBase64, err := fetchImage(details.Branding.IconURL)
-	/*
-		if err != nil {
-			return nil, fmt.Errorf("failed to fetch logo: %v", err)	const defaultIcons = {
-			stock: '<svg>...</svg>', // Add your default SVG content
-			fund: '<svg>...</svg>',
-			futures: '<svg>...</svg>',
-			forex: '<svg>...</svg>',
-			indices: '<svg>...</svg>'
-		} as const;*/
-
-	response := TickerDetailsResponse{
-		Ticker:                      details.Ticker,
-		Name:                        details.Name,
-		Market:                      string(details.Market),
-		Locale:                      string(details.Locale),
-		PrimaryExchange:             details.PrimaryExchange,
-		Active:                      details.Active,
-		MarketCap:                   details.MarketCap,
-		Description:                 details.Description,
-		ShareClassSharesOutstanding: details.ShareClassSharesOutstanding,
-		Logo:                        logoBase64,
-		Icon:                        iconBase64,
-		Sector:                      sector,
-		Industry:                    industry,
-	}
-
-	return response, nil
-}
-
-type GetSecurityClassificationsResults struct {
-	Sectors    []string `json:"sectors"`
-	Industries []string `json:"industries"`
-}
-
-func GetSecurityClassifications(conn *utils.Conn, userId int, rawArgs json.RawMessage) (interface{}, error) {
-	// Query to get unique sectors, excluding NULL values and empty strings
-	sectorQuery := `
-		SELECT DISTINCT sector 
-		FROM securities 
-		WHERE sector IS NOT NULL 
-		AND sector != '' 
-		AND maxDate IS NULL 
-		ORDER BY sector
-	`
-
-	industryQuery := `
-		SELECT DISTINCT industry 
-		FROM securities 
-		WHERE industry IS NOT NULL 
-		AND industry != '' 
-		AND maxDate IS NULL 
-		ORDER BY industry
-	`
-
-	sectorRows, err := conn.DB.Query(context.Background(), sectorQuery)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query sectors: %v", err)
-	}
-	defer sectorRows.Close()
-
-	var sectors []string
-	for sectorRows.Next() {
-		var sector string
-		if err := sectorRows.Scan(&sector); err != nil {
-			return nil, fmt.Errorf("failed to scan sector: %v", err)
-		}
-		sectors = append(sectors, sector)
-	}
-
-	if err := sectorRows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating over sectors: %v", err)
-	}
-
-	industryRows, err := conn.DB.Query(context.Background(), industryQuery)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query industries: %v", err)
-	}
-	defer industryRows.Close()
-
-	var industries []string
-	for industryRows.Next() {
-		var industry string
-		if err := industryRows.Scan(&industry); err != nil {
-			return nil, fmt.Errorf("failed to scan industry: %v", err)
-		}
-		industries = append(industries, industry)
-	}
-
-	if err := industryRows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating over industries: %v", err)
-	}
-
-	return GetSecurityClassificationsResults{
-		Sectors:    sectors,
-		Industries: industries,
-	}, nil
-}
-
-type GetEdgarFilingsArgs struct {
-	SecurityId int    `json:"securityId"`
-	Timestamp  int64  `json:"timestamp"`
-	From       *int64 `json:"from,omitempty"`
-	To         *int64 `json:"to,omitempty"`
-	Limit      int    `json:"limit,omitempty"`
-}
-
-func GetEdgarFilings(conn *utils.Conn, userId int, rawArgs json.RawMessage) (interface{}, error) {
-	var args GetEdgarFilingsArgs
-	if err := json.Unmarshal(rawArgs, &args); err != nil {
-		return nil, fmt.Errorf("invalid args: %v", err)
-	}
-
-	// Set default timestamp to now if not provided
-	if args.Timestamp == 0 {
-		args.Timestamp = time.Now().UnixMilli()
-	}
-
-	// Create EdgarFilingOptions from the args
-	var opts *utils.EdgarFilingOptions
-	if args.From != nil || args.To != nil || args.Limit > 0 {
-		opts = &utils.EdgarFilingOptions{
-			Limit: args.Limit,
-		}
-
-		// Convert From timestamp if provided
-		if args.From != nil {
-			fromTime := time.UnixMilli(*args.From)
-			opts.From = &fromTime
-		}
-
-		// Convert To timestamp if provided
-		if args.To != nil {
-			if *args.To == 0 {
-				now := time.Now()
-				opts.To = &now
-			} else {
-				toTime := time.UnixMilli(*args.To)
-				opts.To = &toTime
+		// Mark as complete but then check if further input is needed.
+		iQ.status = 'complete';
+		if (iQ.requiredKeys === 'any') {
+			if (Object.keys(iQ.instance).length === 0) {
+				iQ.status = 'active';
+			}
+		} else {
+			for (const attribute of iQ.requiredKeys) {
+				if (!iQ.instance[attribute]) {
+					iQ.status = 'active';
+					break;
+				}
 			}
 		}
+		iQ.inputString = '';
+		iQ.inputType = '';
+		iQ.inputValid = true;
+		// Reset manualInputType to auto after input is entered
+		manualInputType = 'auto';
+		return iQ;
 	}
 
-	filings, err := utils.GetRecentEdgarFilings(conn, args.SecurityId, opts)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get EDGAR filings: %v", err)
-	}
+	// Handle keyboard input directly on the input window
+	async function handleKeyDown(event: KeyboardEvent): Promise<void> {
+		// Get current state directly from the store to ensure we have latest state
+		const currentState = get(inputQuery);
 
-	return filings, nil
-}
-
-type GetIconsArgs struct {
-	Tickers []string `json:"tickers"`
-}
-
-type GetIconsResults struct {
-	Ticker string `json:"ticker"`
-	Icon   string `json:"icon"`
-}
-
-func GetIcons(conn *utils.Conn, userId int, rawArgs json.RawMessage) (interface{}, error) {
-	var args GetIconsArgs
-	if err := json.Unmarshal(rawArgs, &args); err != nil {
-		return nil, fmt.Errorf("invalid args: %v", err)
-	}
-
-	// Prepare a query to fetch icons for the given tickers
-	query := `
-		SELECT ticker, icon
-		FROM securities
-		WHERE ticker = ANY($1)
-	`
-
-	rows, err := conn.DB.Query(context.Background(), query, args.Tickers)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query icons: %v", err)
-	}
-	defer rows.Close()
-
-	var results []GetIconsResults
-	for rows.Next() {
-		var result GetIconsResults
-		if err := rows.Scan(&result.Ticker, &result.Icon); err != nil {
-			return nil, fmt.Errorf("failed to scan icon: %v", err)
+		// Make sure we're in active state
+		if (currentState.status !== 'active') {
+			return;
 		}
-		results = append(results, result)
-	}
 
-	return results, nil
-}
-
-
-<file>frontend/src/lib/features/quotes/quote.svelte</file>
-<script lang="ts">
-	import L1 from './l1.svelte';
-	import TimeAndSales from './timeAndSales.svelte';
-	import { get, writable, type Writable } from 'svelte/store';
-	import { queryInstanceInput } from '$lib/utils/popups/input.svelte';
-	import type { Instance } from '$lib/core/types';
-	import { activeChartInstance, queryChart } from '$lib/features/chart/interface';
-	import StreamCell from '$lib/utils/stream/streamCell.svelte';
-	import { streamInfo, formatTimestamp } from '$lib/core/stores';
-	import { onMount } from 'svelte';
-	import { privateRequest } from '$lib/core/backend';
-
-	let instance: Writable<Instance> = writable({});
-	let container: HTMLDivElement;
-	let showTimeAndSales = false;
-
-	// Sync instance with activeChartInstance
-	activeChartInstance.subscribe((chartInstance) => {
-		if (chartInstance) {
-			instance.set(chartInstance);
+		// Always prevent default behavior for our captured keys to avoid browser handling
+		if (
+			event.key === 'Enter' ||
+			event.key === 'Tab' ||
+			event.key === 'Escape' ||
+			/^[a-zA-Z0-9]$/.test(event.key) ||
+			/[-:.]/.test(event.key) ||
+			(event.key === ' ' && currentState.inputType === 'timestamp') ||
+			event.key === 'Backspace'
+		) {
+			event.preventDefault();
 		}
-	});
 
-	function handleKey(event: KeyboardEvent) {
-		// Example: if user presses tab or alphanumeric, prompt ticker change
-		if (event.key == 'Tab' || /^[a-zA-Z0-9]$/.test(event.key)) {
-			const current = get(instance);
-			queryInstanceInput(['ticker'], ['ticker'], current)
-				.then((updated: Instance) => {
-					instance.set(updated);
-				})
-				.catch(() => {});
+		// Stop propagation to prevent double-handling
+		event.stopPropagation();
+
+		let iQ = { ...currentState };
+		if (event.key === 'Escape') {
+			inputQuery.update((q) => ({ ...q, status: 'cancelled' }));
+			return;
+		} else if (event.key === 'Enter') {
+			if (iQ.inputValid) {
+				const updatedQuery = await enterInput(iQ, 0);
+				inputQuery.set(updatedQuery);
+			}
+			return;
+		} else if (event.key === 'Tab') {
+			inputQuery.update((q) => ({
+				...q,
+				instance: { ...q.instance, extendedHours: !q.instance.extendedHours }
+			}));
+			return;
+		}
+
+		// Process input keys
+		if (
+			/^[a-zA-Z0-9]$/.test(event.key) ||
+			/[-:.]/.test(event.key) ||
+			(event.key === ' ' && iQ.inputType === 'timestamp')
+		) {
+			// Transform the key based on input type
+			const key = iQ.inputType === 'timeframe' ? event.key : event.key.toUpperCase();
+			const newInputString = iQ.inputString + key;
+
+			// Update inputString immediately
+			inputQuery.update((v) => ({
+				...v,
+				inputString: newInputString
+			}));
+
+			// Then determine input type
+			determineInputType(newInputString);
+		} else if (event.key === 'Backspace') {
+			const newInputString = iQ.inputString.slice(0, -1);
+
+			// Update inputString immediately
+			inputQuery.update((v) => ({
+				...v,
+				inputString: newInputString
+			}));
+
+			// Then determine input type
+			determineInputType(newInputString);
 		}
 	}
 
-	function toggleTimeAndSales() {
-		showTimeAndSales = !showTimeAndSales;
+	function determineInputType(inputString: string): void {
+		const iQ = get(inputQuery);
+		let inputType = iQ.inputType;
+
+		// Only auto-classify if manualInputType is set to 'auto'
+		if (manualInputType === 'auto') {
+			if (inputString !== '') {
+				if (iQ.possibleKeys.includes('ticker') && /^[A-Z]$/.test(inputString)) {
+					inputType = 'ticker';
+				} else if (iQ.possibleKeys.includes('price') && /^(?:\d*\.\d+|\d{3,})$/.test(inputString)) {
+					inputType = 'price';
+				} else if (
+					iQ.possibleKeys.includes('timeframe') &&
+					/^\d{1,2}[hdwmqs]?$/i.test(inputString)
+				) {
+					inputType = 'timeframe';
+				} else if (iQ.possibleKeys.includes('timestamp') && /^[\d-]+$/.test(inputString)) {
+					inputType = 'timestamp';
+				} else if (iQ.possibleKeys.includes('ticker')) {
+					inputType = 'ticker';
+				} else {
+					inputType = '';
+				}
+			} else {
+				inputType = '';
+			}
+		} else {
+			// Use the manually selected input type
+			inputType = manualInputType;
+		}
+
+		// Update the input type
+		inputQuery.update((v) => ({
+			...v,
+			inputType
+		}));
+
+		// Trigger validation
+		currentSecurityResultRequest++;
+		const thisSecurityResultRequest = currentSecurityResultRequest;
+		validateInput(inputString, inputType).then((validationResp: ValidateResponse) => {
+			if (thisSecurityResultRequest === currentSecurityResultRequest) {
+				inputQuery.update((v: InputQuery) => ({
+					...v,
+					...validationResp
+				}));
+				loadedSecurityResultRequest = thisSecurityResultRequest;
+			}
+		});
 	}
 
-	function handleClick(event: MouseEvent | TouchEvent) {
-		if ($activeChartInstance) {
-			queryChart($activeChartInstance);
+	// Handle clicks outside the popup to close it
+	function handleOutsideClick(event: MouseEvent) {
+		const inputWindow = document.getElementById('input-window');
+		if (!inputWindow || !inputWindow.contains(event.target as Node)) {
+			inputQuery.update((v) => ({ ...v, status: 'cancelled' }));
 		}
 	}
 
-	$: if (container) {
-		container.addEventListener('keydown', handleKey);
+	function closeWindow() {
+		inputQuery.update((v) => ({ ...v, status: 'cancelled' }));
+	}
+
+	let sectors: string[] = [];
+	let industries: string[] = [];
+	function capitalize(str: string, lower = false): string {
+		return (lower ? str.toLowerCase() : str).replace(/(?:^|\s|["'([{])+\S/g, (match: string) =>
+			match.toUpperCase()
+		);
+	}
+
+	function formatTimeframe(timeframe: string): string {
+		const match = timeframe.match(/^(\d+)([dwmsh]?)$/i) ?? null;
+		let result = timeframe;
+		if (match) {
+			switch (match[2]) {
+				case 'd':
+					result = `${match[1]} days`;
+					break;
+				case 'w':
+					result = `${match[1]} weeks`;
+					break;
+				case 'm':
+					result = `${match[1]} months`;
+					break;
+				case 'h':
+					result = `${match[1]} hours`;
+					break;
+				case 's':
+					result = `${match[1]} seconds`;
+					break;
+				default:
+					result = `${match[1]} minutes`;
+					break;
+			}
+			if (match[1] === '1') {
+				result = result.slice(0, -1);
+			}
+		}
+		return result;
 	}
 
 	onMount(() => {
-		activeChartInstance.subscribe((instance: Instance | null) => {
-			if (instance && !instance.detailsFetched && instance.securityId) {
-				privateRequest('getTickerMenuDetails', { securityId: instance.securityId }, true).then(
-					(details) => {
-						activeChartInstance.update((inst: Instance) => ({
-							...inst,
-							...details,
-							detailsFetched: true
-						}));
-					}
-				);
+		// Store the currently focused element
+		prevFocusedElement = document.activeElement as HTMLElement;
+
+		const unsubscribe = inputQuery.subscribe((v: InputQuery) => {
+			if (browser) {
+				if (v.status === 'initializing') {
+					// Store focused element before showing the popup
+					prevFocusedElement = document.activeElement as HTMLElement;
+                    
+                    // Mark the UI as active now
+                    inputQuery.update((state) => ({ ...state, status: 'active' }));
+                    
+                    // Focus the input window after it renders
+                    tick().then(() => {
+                        // Focus the input window itself (will receive keyboard events)
+                        if (inputWindowElement) {
+                            inputWindowElement.focus();
+                        }
+                        
+                        // Add a click handler to the document to detect clicks outside the popup
+                        document.addEventListener('mousedown', handleOutsideClick);
+                    });
+				} else if (v.status === 'shutdown' || v.status === 'cancelled') {
+					// Remove document click handler
+					document.removeEventListener('mousedown', handleOutsideClick);
+					
+					// Restore focus to the previously focused element
+					if (prevFocusedElement) {
+                        tick().then(() => {
+                            prevFocusedElement?.focus();
+                            
+                            if (v.status === 'shutdown') {
+                                // Reset to inactive only after focus is restored
+                                inputQuery.update((state) => ({ ...state, status: 'inactive', inputString: '' }));
+                            }
+                        });
+					} else if (v.status === 'shutdown') {
+                        // Reset to inactive if there was no previous element
+                        inputQuery.update((state) => ({ ...state, status: 'inactive', inputString: '' }));
+                    }
+				}
 			}
 		});
 
-		document.addEventListener('mousemove', handleMouseMove);
-		document.addEventListener('mouseup', handleMouseUp);
-
+		type SecurityClassifications = {
+			sectors: string[];
+			industries: string[];
+		};
+		privateRequest<SecurityClassifications>('getSecurityClassifications', {}, false).then(
+			(classifications: SecurityClassifications) => {
+				sectors = classifications.sectors;
+				industries = classifications.industries;
+			}
+		);
+		
 		return () => {
-			document.removeEventListener('mousemove', handleMouseMove);
-			document.removeEventListener('mouseup', handleMouseUp);
+			unsubscribe();
 		};
 	});
 
-	function handleMouseMove(e: MouseEvent | TouchEvent) {
-		// This function is now empty as the height-related variables and functions are removed
+	onDestroy(() => {
+		// Clean up any remaining event listeners
+		document.removeEventListener('mousedown', handleOutsideClick);
+	});
+	
+	function displayValue(q: InputQuery, key: string): string {
+		if (key === q.inputType) {
+			return q.inputString;
+		} else if (key in q.instance) {
+			if (key === 'timestamp') {
+				return UTCTimestampToESTString(q.instance.timestamp ?? 0);
+			} else if (key === 'extendedHours') {
+				return q.instance.extendedHours ? 'True' : 'False';
+			} else if (key === 'price') {
+				return '$' + String(q.instance.price);
+			} else {
+				return String(q.instance[key as keyof Instance]);
+			}
+		}
+		return '';
+	}
+</script>
+
+{#if $inputQuery.status === 'active' || $inputQuery.status === 'initializing'}
+	<div
+		class="popup-container"
+		id="input-window"
+		bind:this={inputWindowElement}
+		tabindex="0"
+		on:keydown={handleKeyDown}
+	>
+		<div class="header">
+			<div class="title">{capitalize($inputQuery.inputType)} Input</div>
+			<div class="field-select">
+				<span class="label">Field:</span>
+				<select
+					class="default-select"
+					bind:value={manualInputType}
+					on:click|stopPropagation
+					on:change|stopPropagation
+				>
+					<option value="auto">Auto</option>
+					{#each $inputQuery.possibleKeys as key}
+						<option value={key}>{capitalize(key)}</option>
+					{/each}
+				</select>
+			</div>
+			<button class="utility-button" on:click|stopPropagation={closeWindow}>×</button>
+		</div>
+
+		<div class="search-bar">
+			<input type="text" placeholder="Enter Value" value={$inputQuery.inputString} readonly />
+		</div>
+		<div class="content-container">
+			{#if $inputQuery.instance && Object.keys($inputQuery.instance).length > 0}
+				{#if $inputQuery.inputType === ''}
+					<div class="span-container">
+						{#each $inputQuery.possibleKeys as key}
+							<div class="span-row">
+								<span
+									class={$inputQuery.requiredKeys !== 'any' &&
+									$inputQuery.requiredKeys.includes(key) &&
+									!$inputQuery.instance[key]
+										? 'red'
+										: ''}
+								>
+									{capitalize(key)}
+								</span>
+								<span class="value">
+									{displayValue($inputQuery, key)}
+								</span>
+							</div>
+						{/each}
+					</div>
+				{:else if $inputQuery.inputType === 'ticker'}
+					<div class="table-container">
+						{#if isLoadingSecurities}
+							<div class="loading-container">
+								<div class="loading-spinner"></div>
+								<span class="label">Loading securities...</span>
+							</div>
+						{:else if Array.isArray($inputQuery.securities) && $inputQuery.securities.length > 0}
+							<table>
+								<tbody>
+									{#each $inputQuery.securities as sec, i}
+										<tr
+											on:click={async () => {
+												const updatedQuery = await enterInput($inputQuery, i);
+												inputQuery.set(updatedQuery);
+											}}
+										>
+											<td class="defalt-td">
+												<div
+													style="background-color: transparent; width: 100px; height: 30px; display: flex; align-items: center; justify-content: center;"
+												>
+													{#if sec.icon}
+														<img
+															src={`data:image/jpeg;base64,${sec.icon}`}
+															alt="Security Image"
+															style="max-width: 100%; max-height: 100%; object-fit: contain;"
+														/>
+													{/if}
+												</div>
+											</td>
+											<td class="defalt-td">{sec.ticker}</td>
+											<td class="defalt-td">{sec.name}</td>
+											<td class="defalt-td"
+												>{sec.timestamp !== undefined
+													? UTCTimestampToESTString(sec.timestamp)
+													: ''}</td
+											>
+										</tr>
+									{/each}
+								</tbody>
+							</table>
+						{/if}
+					</div>
+				{:else if $inputQuery.inputType === 'timestamp'}
+					<div class="span-container">
+						<div class="span-row">
+							<span class="label">Timestamp</span>
+							<input
+								type="datetime-local"
+								on:change={(e) => {
+									// Use type casting in a different way that works better with Svelte compiler
+									const target = e.target;
+									const inputValue = target && 'value' in target ? String(target.value) : '';
+									const date = new Date(inputValue);
+									inputQuery.update((q) => ({
+										...q,
+										instance: {
+											...q.instance,
+											timestamp: !isNaN(date.getTime()) ? date.getTime() : q.instance.timestamp
+										},
+										inputValid: !isNaN(date.getTime())
+									}));
+								}}
+							/>
+						</div>
+					</div>
+				{:else if $inputQuery.inputType === 'timeframe'}
+					<div class="span-container">
+						<div class="span-row">
+							<span class="label">Timeframe</span>
+							<span class="value">{formatTimeframe($inputQuery.inputString)}</span>
+						</div>
+					</div>
+				{:else if $inputQuery.inputType === 'extendedHours'}
+					<div class="span-container">
+						<div class="span-row">
+							<span class="label">Extended Hours</span>
+							<span class="value">{$inputQuery.instance.extendedHours ? 'True' : 'False'}</span>
+						</div>
+					</div>
+					0
+				{/if}
+			{/if}
+		</div>
+	</div>
+{/if}
+
+<style>
+	.popup-container {
+		width: 700px;
+		height: 600px;
+		background: var(--ui-bg-primary);
+		border: 1px solid var(--ui-border);
+		border-radius: 8px;
+		display: flex;
+		flex-direction: column;
+		overflow: hidden;
+		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+		position: fixed;
+		top: 50%;
+		left: 50%;
+		transform: translate(-50%, -50%);
+		z-index: 9999;
+	}
+	.span-container {
+		display: felx;
+		flex-direction: column;
+		gap: 8px;
+		width: 100%;
+	}
+	.span-container span {
+		align-items: top;
+		display: block;
+		flex-direction: row;
+		width: 100%;
+		font-size: 30px;
+	}
+	.span-row {
+		/* Each row is a flex container, left label and right value */
+		display: flex;
+		flex-direction: row;
+		justify-content: space-between;
+		/* optionally align items on the baseline or center */
+		align-items: baseline;
 	}
 
-	function handleMouseUp() {
-		// This function is now empty as the height-related variables and functions are removed
+	.span-row span {
+		/* Let it inherit the global font instead of forcing a size */
+		font-size: inherit;
+	}
+
+	.header {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		padding: 8px 12px;
+		border-bottom: 1px solid var(--ui-border);
+		height: 40px;
+	}
+
+	.title {
+		font-size: 16px;
+		font-weight: 500;
+		color: var(--text-primary);
+	}
+
+	.search-bar {
+		padding: 8px 12px;
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		border-bottom: 1px solid var(--ui-border);
+		height: 48px;
+		position: relative;
+	}
+
+	.search-bar input {
+		flex: 1;
+		background: var(--ui-bg-element);
+		border: 1px solid var(--ui-border);
+		padding: 6px 10px;
+		color: var(--text-primary);
+		border-radius: 4px;
+	}
+
+	.search-icon {
+		color: var(--text-secondary);
+	}
+
+	.filters {
+		padding: 4px 8px;
+		display: flex;
+		gap: 4px;
+		flex-wrap: wrap;
+		border-bottom: 1px solid var(--ui-border);
+		height: auto;
+		max-height: 80px;
+		overflow-y: auto;
+	}
+
+	.filter-bubble {
+		background: transparent;
+		border: 1px solid var(--ui-border);
+		color: var(--text-secondary);
+		padding: 2px 8px;
+		border-radius: 8px;
+		font-size: 10px;
+		cursor: pointer;
+		transition: all 0.2s;
+	}
+
+	.filter-bubble.active {
+		background: var(--ui-accent);
+		border-color: var(--ui-accent);
+		color: var(--text-primary);
+	}
+
+	.content-container {
+		flex: 1;
+		overflow-y: auto;
+		padding: 12px;
+	}
+
+	.field-select {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin-left: auto;
+	}
+
+	.field-select span {
+		color: var(--text-secondary);
+		font-size: 14px;
+	}
+	
+	.loading-spinner {
+		width: 30px;
+		height: 30px;
+		border: 3px solid var(--ui-border);
+		border-top: 3px solid var(--text-primary);
+		border-radius: 50%;
+		animation: spin 1s linear infinite;
+		margin-bottom: 10px;
+	}
+	.security-item {
+		display: flex;
+		align-items: center;
+		padding: 8px 12px;
+		cursor: pointer;
+		border-bottom: 1px solid var(--ui-border);
+		height: 40px;
+	}
+
+	.security-item:hover {
+		background: var(--ui-bg-hover);
+	}
+
+	.security-icon {
+		margin-right: 12px;
+		width: 24px;
+		height: 24px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.security-icon img {
+		width: 28px;
+		height: 28px;
+		object-fit: contain;
+	}
+
+	.security-info {
+		flex: 1;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		gap: 12px;
+	}
+
+	.security-main {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		flex: 1;
+	}
+
+	.ticker {
+		font-weight: 600;
+		color: var(--text-primary);
+		min-width: 60px;
+		font-size: 0.9em;
+	}
+
+	.name {
+		color: var(--text-secondary);
+		font-size: 0.85em;
+		flex: 1;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.security-details {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		flex: 1;
+		color: var(--text-secondary);
+		font-size: 0.8em;
+		margin-left: auto;
+	}
+
+	.sector {
+		color: var(--text-secondary);
+		font-size: 0.8em;
+		margin-right: 8px;
+	}
+
+	.exchange {
+		color: var(--text-secondary);
+		font-size: 0.8em;
+		min-width: 50px;
+	}
+
+	.date {
+		color: var(--text-secondary);
+		align-items: center;
+		justify-content: center;
+		padding: 20px;
+	}
+</style>
+
+
+<file>../broker/services/frontend/src/routes/app/chart.svelte</file>
+<!-- chart.svelte -->
+<script>
+	import { onMount } from "svelte";
+	import { chart } from "../../chart/chart.js";
+	import {toDT, chartQuery, setups_list,menuLeftPos,  request , currentEntry} from "../../store.js";
+	let innerWidth, canvas, innerHeight, Chart, queryLabel,  selectedT, selectedPrice, selectedMenuAction, clickX, clickY;
+    let chartMenuVisible = false;
+    let chartFocused = true;
+	let queryError = "";
+    let queryValue = "";
+    import { get } from 'svelte/store';
+
+    function handleChartClick(event) {
+        chartFocused = true;
+        chartMenuVisible = false;
+        selectedMenuAction = null;
+    }
+    function updateChartSize(v) {
+        if (!canvas) {
+            return;
+        }
+        canvas.width = v;
+        canvas.height = window.innerHeight;
+        Chart.draw();
+    }
+    function handleWindowClick(event) {
+        if (!canvas.contains(event.target)) {
+            chartMenuVisible = false;
+            chartFocused = false;
+            queryValue = "";
+            queryLabel = null;
+            queryError = "";
+        }
+    }
+    function handleRightClick(event) {
+        if (!Chart.queryValid) return;
+        clickX = event.clientX - canvas.getBoundingClientRect().left;
+        clickY = event.clientY - canvas.getBoundingClientRect().top;
+        chartMenuVisible = true;
+        selectedT = Chart.currentT;
+        selectedPrice = Chart.currentPrice;
+    }
+
+	onMount(() => {
+		Chart = new chart(canvas, {
+            margin: 20,
+            defaultCandleWidth: 10,
+        });
+        menuLeftPos.subscribe((v) => updateChartSize(v));
+        chartQuery.subscribe((v) => {Chart.updateQuery(v[0],v[1],v[2],v[3]);});
+        window.addEventListener("resize", updateChartSize);
+        window.addEventListener("click", handleWindowClick);
+        canvas.addEventListener("contextmenu", (event) => {event.preventDefault();handleRightClick(event);});
+        canvas.addEventListener("click", handleChartClick);
+        chartQuery.set(["MSTR","1d",null,false])
+        return () => {
+            window.removeEventListener("click", handleWindowClick);
+            window.removeEventListener("resize", updateChartSize);
+            canvas.removeEventListener("click", handleChartClick);
+        };
+    });
+
+    function classifyInput(input){
+        if (queryValue) {
+        return /^[0-9]$/.test(input[0]) ? "Interval" : "Ticker";
+        }else{
+            return null;
+        }
+    }
+
+
+
+	function onKeydown(event) {
+        if (!chartFocused) return;
+        chartMenuVisible = false;
+		if (/^[a-zA-Z0-9]$/.test(event.key.toLowerCase())) {
+            console.log(queryValue);
+            queryError = ""
+			queryValue += event.key;
+            queryLabel = classifyInput(queryValue);
+		}else if (event.key == "Backspace") {
+            queryValue = queryValue.slice(0, -1);
+            queryLabel = classifyInput(queryValue);
+        }else if (event.key == "Escape") {
+            queryValue = "";
+            queryLabel = null;
+            queryError = "";
+        }
+        else if (event.key == "Enter") {
+            switch (queryLabel) {
+                case "Ticker":
+                    chartQuery.update((v) => {return ([queryValue.toUpperCase(),v[1],v[2],v[3]])});
+                    break;
+                case "Interval":
+                    chartQuery.update((v) => {return ([v[0],queryValue,v[2],v[3]])});
+                    break;
+                case "Date":
+                    break;
+                case null:
+                    queryError = "Invalid Input";
+                    break;
+            }
+			queryValue = "";
+		}
+	}
+</script>
+
+
+<canvas bind:this={canvas} class="chart-container"></canvas>
+<svelte:window on:keydown={onKeydown} bind:innerWidth bind:innerHeight />
+
+{#if chartMenuVisible}
+    <div class="menu" style="top: {clickY}px; left: {clickX}px;">
+        <p>Add {`${Chart.ticker} ${toDT(selectedT)}`} to ...</p>
+        <button on:click={() => {selectedMenuAction = "newAnnotation"; chartMenuVisible = false}}>Annotate</button>
+        <button on:click={() => {currentEntry.update((e) => `${e} [${Chart.ticker}|${Chart.i}|${selectedT}|${Chart.pm}] `)}}>Entry</button>
+    </div>
+{/if}
+{#if selectedMenuAction}
+    <div class="menu" style="top: {clickY}px; left: {clickX}px;">
+        {#each $setups_list as setup}
+            <button on:click={() => {request(null,true,selectedMenuAction,Chart.ticker,setup[0],selectedT); selectedMenuAction = null; chartMenuVisible = false}}>{setup[1]}</button>
+        {/each}
+    </div>
+{/if}
+
+{#if queryValue}
+    <div class="query">
+        <div class="value">{queryValue}</div>
+        <div class="label">{queryLabel}</div>
+    </div>
+{/if}
+{#if queryError}
+    <div class="queryError">
+        {queryError}
+    </div>
+{/if}
+
+<style>
+    @import "../../global.css";
+    .chart-container {
+        background-color: black;
+        width: 100%;
+        height: 100%;
+        /*flex-grow: 1;*/
+
+    }
+	.menu {
+        position: absolute;
+        color: white; 
+        background-color: var(--c2); 
+        padding: 10px; 
+        border-radius: 5px; 
+        text-align: left; 
+        box-sizing: border-box;
+        z-index: 1000;
+        font-size: 16px; 
+        box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2); 
+        font-family: Arial, sans-serif; 
+        border: 2px solid var(--c3); 
+    }
+
+    .menu button {
+        display: block; 
+        margin: 5px 0; 
+        background-color: var(--c1); 
+        color: var(--f1); 
+        border: none;
+        border-radius: 4px;
+        padding: 10px 20px;
+        text-align: left; 
+        width: 100%; 
+        box-sizing: border-box; 
+        transition: background-color 0.3s; 
+        cursor: pointer; 
+    }
+
+    .menu button:hover {
+        background-color: #505760; 
+    }
+
+    .query {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        background-color: var(--c2); 
+        border: 2px solid var(--c3);
+        padding: 10px;
+        border-radius: 5px;
+        text-align: center;
+        box-sizing: border-box;
+        z-index: 2000;
+        font-size: 16px; 
+        color: var(--f1);
+        font-family: Arial, sans-serif; 
+        text-transform: uppercase; 
+    }
+    .value {
+        font-size: 16pt; 
+    }
+    .label {
+        margin-top: 10px; 
+        font-size: 14pt; 
+    }
+    .queryError {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        z-index: 10000;
+        color: var(--c4);
+        background-color: #FFD2D2;
+        padding: 20px 40px;
+        border-radius: 10px;
+        border: 2px solid #D8000C;
+        box-shadow: 0px 0px 20px rgba(0, 0, 0, 0.7);
+        font-size: 20px;
+        font-weight: bold;
+        text-align: center;
+        max-width: 600px;
+        word-wrap: break-word;
+        box-sizing: border-box;
+    }
+</style>
+
+
+<file>../study/frontend/src/lib/features/chart/chartContainer.svelte</file>
+<script lang="ts">
+	import Chart from './chart.svelte';
+	import { settings } from '$lib/core/stores';
+	import { onMount, tick } from 'svelte';
+	import { get } from 'svelte/store';
+	import { queryInstanceInput } from '$lib/utils/popups/input.svelte';
+	import { queryChart } from './interface';
+	export let width: number;
+
+	// Add focus management
+	let containerRef: HTMLDivElement;
+
+	onMount(() => {
+		// Focus the chart container immediately after it's mounted
+		if (containerRef) {
+			containerRef.focus();
+		}
+
+		// Add global keyboard event listener for chart container
+		const handleGlobalKeydown = (event: KeyboardEvent) => {
+			// If an input popup is active, don't process keyboard input here
+			const inputWindow = document.getElementById('input-window');
+			if (inputWindow) {
+				return;
+			}
+
+			// Only handle alphanumeric keys when no modal is active and no modifier keys are pressed
+			if (
+				/^[a-zA-Z0-9]$/.test(event.key) &&
+				!event.ctrlKey &&
+				!event.metaKey &&
+				!event.altKey &&
+				document.activeElement !== document.body // Don't interfere with other focused elements
+			) {
+				// Create an initial instance with the first key as the inputString
+				const initialKey = event.key.toUpperCase();
+
+				// Use type assertion to allow the inputString property
+				const instanceWithInput = {
+					inputString: initialKey
+				} as any;
+
+				queryInstanceInput(
+					'any',
+					['ticker', 'timeframe', 'timestamp', 'extendedHours'],
+					instanceWithInput
+				).then((updatedInstance) => {
+					queryChart(updatedInstance, true);
+					// Focus will be automatically restored to the chart by the input component
+				});
+			}
+		};
+
+		document.addEventListener('keydown', handleGlobalKeydown);
+
+		return () => {
+			document.removeEventListener('keydown', handleGlobalKeydown);
+		};
+	});
+
+	// Handle focus management
+	function handleKeyDown(event: KeyboardEvent) {
+		if (event.key === 'Tab') {
+			event.preventDefault(); // Prevent default tab behavior
+		}
 	}
 </script>
 
 <div
-	class="ticker-info-container"
-	bind:this={container}
-	on:click={handleClick}
-	on:touchstart={handleClick}
+	class="chart-container"
+	bind:this={containerRef}
+	tabindex="0"
+	role="application"
+	aria-label="Chart Container"
+	on:keydown={handleKeyDown}
 >
-	<div class="content">
-		<div class="ticker-container">
-			<div class="ticker-display">
-				<span class="ticker">{$instance.ticker || '--'}</span>
-			</div>
+	{#each Array.from({ length: $settings.chartRows }) as _, j}
+		<div class="row" style="height: calc(100% / {$settings.chartRows})">
+			{#each Array.from({ length: $settings.chartColumns }) as _, i}
+				<Chart width={width / $settings.chartColumns} chartId={i + j * $settings.chartColumns} />
+			{/each}
 		</div>
-
-		{#if $activeChartInstance?.logo}
-			<div class="logo-container">
-				<img
-					src="data:image/svg+xml;base64,{$activeChartInstance.logo}"
-					alt="{$activeChartInstance.name} logo"
-					class="company-logo"
-				/>
-			</div>
-		{/if}
-
-		<div class="stream-cells">
-			<div class="stream-cell-container">
-				<span class="label">Price</span>
-				<StreamCell instance={$activeChartInstance} type="price" />
-			</div>
-			<div class="stream-cell-container">
-				<span class="label">Chg %</span>
-				<StreamCell instance={$activeChartInstance} type="change %" />
-			</div>
-			<div class="stream-cell-container">
-				<span class="label">Chg $</span>
-				<StreamCell instance={$activeChartInstance} type="change" />
-			</div>
-			<div class="stream-cell-container">
-				<span class="label">Ext %</span>
-				<StreamCell instance={$activeChartInstance} type="change % extended" />
-			</div>
-		</div>
-
-		<div class="quotes-section">
-			<L1 {instance} />
-			<button class="time-sales-button" on:click|stopPropagation={toggleTimeAndSales}>
-				{showTimeAndSales ? 'Hide Time & Sales' : 'Show Time & Sales'}
-			</button>
-			{#if showTimeAndSales}
-				<TimeAndSales {instance} />
-			{/if}
-		</div>
-
-		<div class="info-row">
-			<span class="label">Name:</span>
-			<span class="value">{$activeChartInstance?.name}</span>
-		</div>
-		<div class="info-row">
-			<span class="label">Active:</span>
-			<span class="value">{$activeChartInstance?.active || 'N/A'}</span>
-		</div>
-		<div class="info-row">
-			<span class="label">Market Cap:</span>
-			<span class="value">
-				{#if $activeChartInstance?.totalShares}
-					<StreamCell instance={$activeChartInstance} type="market cap" />
-				{:else}
-					N/A
-				{/if}
-			</span>
-		</div>
-		<div class="info-row">
-			<span class="label">Sector:</span>
-			<span class="value">{$activeChartInstance?.sector || 'N/A'}</span>
-		</div>
-		<div class="info-row">
-			<span class="label">Industry:</span>
-			<span class="value">{$activeChartInstance?.industry || 'N/A'}</span>
-		</div>
-		<div class="info-row">
-			<span class="label">Exchange:</span>
-			<span class="value">{$activeChartInstance?.primary_exchange || 'N/A'}</span>
-		</div>
-		<div class="info-row">
-			<span class="label">Market:</span>
-			<span class="value">{$activeChartInstance?.market || 'N/A'}</span>
-		</div>
-		<div class="info-row">
-			<span class="label">Shares Out:</span>
-			<span class="value">
-				{#if $activeChartInstance?.share_class_shares_outstanding}
-					{($activeChartInstance.share_class_shares_outstanding / 1e6).toFixed(2)}M
-				{:else}
-					N/A
-				{/if}
-			</span>
-		</div>
-		{#if $activeChartInstance?.description}
-			<div class="description">
-				<span class="label">Description:</span>
-				<p class="value description-text">{$activeChartInstance?.description}</p>
-			</div>
-		{/if}
-	</div>
+	{/each}
 </div>
 
 <style>
-	.ticker-info-container {
-		background: var(--ui-bg-primary);
-		backdrop-filter: var(--backdrop-blur);
-		border-top: 1px solid var(--ui-border);
-		overflow: hidden;
-		will-change: height;
-		font-family: var(--font-primary);
-		height: 100%;
-	}
-
-	.ticker-info-container.expanded {
-		transition: none;
-	}
-
-	.ticker-info-container:not(.expanded) {
-		transition: height 0.2s ease;
-	}
-
-	.content {
-		padding: 15px;
-		overflow-y: auto;
-		scrollbar-width: none;
-		-ms-overflow-style: none;
-		height: 100%;
-		color: var(--text-primary);
-	}
-
-	.content::-webkit-scrollbar {
-		display: none;
-	}
-
-	.company-logo {
-		max-height: 40px;
-		max-width: 200px;
-		object-fit: contain;
-	}
-
-	.ticker-display {
-		font-family: var(--font-primary);
-		font-size: 28px;
-		font-weight: 600;
-		color: var(--text-primary);
-		background: var(--ui-bg-secondary);
+	.chart-container {
+		display: flex;
+		flex-direction: column;
 		width: 100%;
-		height: 50px;
-		text-align: center;
+		height: 100%;
+		position: absolute;
+		top: 0;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		outline: none; /* Remove focus outline but maintain accessibility */
+	}
+
+	.row {
+		display: flex;
+		width: 100%;
+		justify-content: space-between;
+		flex: 1;
+		min-height: 0;
+	}
+</style>
+
+
+<file>../study/frontend/src/lib/features/watchlist.svelte</file>
+<script lang="ts">
+	import List from '$lib/utils/modules/list.svelte';
+	import type { Writable } from 'svelte/store';
+	import { writable, get } from 'svelte/store';
+	import type { Instance, Watchlist } from '$lib/core/types';
+	import { onMount, tick } from 'svelte';
+	import { privateRequest } from '$lib/core/backend';
+	import { queryInstanceInput } from '$lib/utils/popups/input.svelte';
+	import { flagWatchlistId, watchlists, flagWatchlist } from '$lib/core/stores';
+	import '$lib/core/global.css';
+
+	let activeList: Writable<Instance[]> = writable([]);
+	let newWatchlistName = '';
+	let currentWatchlistId: number;
+	let container: HTMLDivElement;
+	let newNameInput: HTMLInputElement;
+	let showWatchlistInput = false;
+	let confirmingDelete = false;
+
+	onMount(() => {
+		selectWatchlist(flagWatchlistId);
+	});
+
+	function addInstance() {
+		const inst = { ticker: '', timestamp: 0 };
+		queryInstanceInput(['ticker'], ['ticker', 'timestamp'], inst).then((i: Instance) => {
+			const aList = get(activeList);
+			const empty = !Array.isArray(aList);
+			if (empty || !aList.find((l: Instance) => l.ticker === i.ticker)) {
+				privateRequest<number>('newWatchlistItem', {
+					watchlistId: parseInt(currentWatchlistId, 10),
+					securityId: i.securityId
+				}).then((watchlistItemId: number) => {
+					activeList.update((v: Instance[]) => {
+						i.watchlistItemId = watchlistItemId;
+						if (empty) {
+							return [i];
+						} else {
+							return [...v, i];
+						}
+					});
+				});
+			}
+			setTimeout(() => {
+				addInstance();
+			}, 1);
+		});
+	}
+
+	function newWatchlist() {
+		if (newWatchlistName === '') return;
+
+		// Check for duplicate names
+		const existingWatchlist = get(watchlists).find(
+			(w) => w.watchlistName.toLowerCase() === newWatchlistName.toLowerCase()
+		);
+
+		if (existingWatchlist) {
+			alert('A watchlist with this name already exists');
+			return;
+		}
+
+		privateRequest<number>('newWatchlist', { watchlistName: newWatchlistName }).then(
+			(newId: number) => {
+				watchlists.update((v: Watchlist[]) => {
+					const w: Watchlist = {
+						watchlistName: newWatchlistName,
+						watchlistId: newId
+					};
+					selectWatchlist(String(newId));
+					newWatchlistName = '';
+					showWatchlistInput = false;
+					if (!Array.isArray(v)) {
+						return [w];
+					}
+					return [w, ...v];
+				});
+			}
+		);
+	}
+
+	function deleteItem(item: Instance) {
+		if (!item.watchlistItemId) {
+			throw new Error('missing id on delete');
+		}
+		privateRequest<void>('deleteWatchlistItem', { watchlistItemId: item.watchlistItemId }).then(
+			() => {
+				activeList.update((items) => {
+					return items.filter((i) => i.watchlistItemId !== item.watchlistItemId);
+				});
+			}
+		);
+	}
+
+	function selectWatchlist(watchlistIdString: string) {
+		if (!watchlistIdString) return;
+
+		if (watchlistIdString === 'new') {
+			showWatchlistInput = true;
+			tick().then(() => {
+				newNameInput.focus();
+			});
+			return;
+		}
+
+		if (watchlistIdString === 'delete') {
+			if (confirmingDelete) {
+				deleteWatchlist(currentWatchlistId);
+				confirmingDelete = false;
+			} else {
+				confirmingDelete = true;
+				const watchlist = get(watchlists).find((w) => w.watchlistId === currentWatchlistId);
+				if (!confirm(`Are you sure you want to delete "${watchlist?.watchlistName}"?`)) {
+					selectWatchlist(String(currentWatchlistId));
+					return;
+				}
+				deleteWatchlist(currentWatchlistId);
+			}
+			return;
+		}
+
+		showWatchlistInput = false;
+		const watchlistId = parseInt(watchlistIdString);
+		if (watchlistId === flagWatchlistId) {
+			activeList = flagWatchlist;
+		} else {
+			activeList = writable<Instance[]>([]);
+		}
+		currentWatchlistId = watchlistId;
+		privateRequest<Instance[]>('getWatchlistItems', { watchlistId: watchlistId }).then(
+			(v: Instance[]) => {
+				activeList.set(v);
+			}
+		);
+	}
+
+	function deleteWatchlist(id: number) {
+		privateRequest<void>('deleteWatchlist', { watchlistId: id }).then(() => {
+			watchlists.update((v: Watchlist[]) => {
+				return v.filter((v: Watchlist) => v.watchlistId !== id);
+			});
+			if (id === flagWatchlistId) {
+				flagWatchlist.set([]);
+			}
+		});
+	}
+
+	// Helper function to get first letter of watchlist name
+	function getWatchlistInitial(name: string): string {
+		return name.charAt(0).toUpperCase();
+	}
+
+	function handleWatchlistChange(event: Event) {
+		const target = event.target as HTMLSelectElement;
+		selectWatchlist(target.value);
+	}
+</script>
+
+<div tabindex="-1" class="feature-container" bind:this={container}>
+	<!-- Controls container first -->
+	<div class="controls-container">
+		{#if Array.isArray($watchlists)}
+			<div class="watchlist-selector">
+				<select
+					class="default-select"
+					id="watchlists"
+					bind:value={currentWatchlistId}
+					on:change={handleWatchlistChange}
+				>
+					<optgroup label="My Watchlists">
+						{#each $watchlists as watchlist}
+							<option value={watchlist.watchlistId}>
+								{watchlist.watchlistName}
+							</option>
+						{/each}
+					</optgroup>
+					<optgroup label="Actions">
+						<option value="new">+ Create New Watchlist</option>
+						{#if currentWatchlistId}
+							<option value="delete">- Delete Current Watchlist</option>
+						{/if}
+					</optgroup>
+				</select>
+				{#if !showWatchlistInput}
+					<button class="utility-button" title="Add Symbol" on:click={addInstance}>+</button>
+				{/if}
+			</div>
+
+			{#if showWatchlistInput}
+				<div class="new-watchlist-container">
+					<input
+						class="input"
+						bind:this={newNameInput}
+						on:keydown={(event) => {
+							if (event.key === 'Enter') {
+								newWatchlist();
+							} else if (event.key === 'Escape') {
+								showWatchlistInput = false;
+								selectWatchlist(String(currentWatchlistId));
+							}
+						}}
+						bind:value={newWatchlistName}
+						placeholder="New Watchlist Name"
+					/>
+					<div class="new-watchlist-buttons">
+						<button class="utility-button" on:click={newWatchlist}>✓</button>
+						<button
+							class="utility-button"
+							on:click={() => {
+								showWatchlistInput = false;
+								selectWatchlist(String(currentWatchlistId));
+							}}>✕</button
+						>
+					</div>
+				</div>
+			{/if}
+		{/if}
+	</div>
+
+	<!-- Shortcut buttons between controls and list -->
+	<div class="shortcut-container">
+		{#if Array.isArray($watchlists)}
+			{#each $watchlists as watchlist}
+				<button
+					class="shortcut-button {currentWatchlistId === watchlist.watchlistId ? 'active' : ''}"
+					on:click={() => selectWatchlist(String(watchlist.watchlistId))}
+				>
+					{getWatchlistInitial(watchlist.watchlistName)}
+				</button>
+			{/each}
+		{/if}
+	</div>
+
+	<List
+		parentDelete={deleteItem}
+		columns={['Ticker', 'Price', 'Chg', 'Chg%', 'Ext']}
+		list={activeList}
+	/>
+</div>
+
+<style>
+	.watchlist-selector {
 		display: flex;
 		align-items: center;
-		justify-content: center;
-		border-radius: 6px;
-	}
-
-	.ticker {
-		letter-spacing: 0.5px;
-		text-transform: uppercase;
-	}
-
-	.ticker-container {
-		margin-bottom: 15px;
-		padding: 0 15%; /* Add padding on sides to make ticker display narrower */
-	}
-
-	.description {
-		margin-top: 15px;
-		padding-top: 10px;
-		border-top: 1px solid var(--ui-border);
-	}
-
-	.stream-cell-container {
-		margin: 0;
-		padding: 0;
-		background: none;
-		font-weight: 500;
-		color: var(--text-secondary);
-	}
-
-	.logo-container {
-		display: flex;
-		justify-content: center;
-		margin-bottom: 15px;
-	}
-
-	.stream-cells {
-		display: grid;
-		grid-template-columns: repeat(4, 1fr);
 		gap: 8px;
-		margin: 15px 0;
 	}
 
-	.stream-cell-container {
-		margin: 0;
-		padding: 0;
-		background: none;
-		font-weight: 500;
-		color: var(--text-secondary);
-		overflow: hidden;
-	}
-
-	.stream-cell-container .label {
-		font-size: 0.85em;
-		display: block;
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		margin-bottom: 2px;
-	}
-
-	.time-sales-button {
+	.new-watchlist-container {
+		margin-top: 8px;
+		padding: 8px;
 		background: var(--ui-bg-secondary);
-		color: var(--text-primary);
-		border: 1px solid var(--ui-border);
 		border-radius: 4px;
-		padding: 6px 12px;
-		font-size: 0.9em;
-		cursor: pointer;
-		transition: background-color 0.2s;
-		margin: 10px 0;
+		border: 1px solid var(--ui-border);
+	}
+
+	.new-watchlist-container .input {
 		width: 100%;
+		margin-bottom: 8px;
 	}
 
-	.time-sales-button:hover {
-		background: var(--ui-bg-hover);
+	.new-watchlist-buttons {
+		display: flex;
+		justify-content: flex-end;
+		gap: 8px;
 	}
 
-	.quotes-section {
-		margin-top: 15px;
-		border-top: 1px solid var(--ui-border);
-		padding-top: 15px;
+	.shortcut-container {
+		display: flex;
+		gap: 8px;
+		padding: 8px 8px 8px 16px;
+		flex-wrap: wrap;
+	}
+
+	/* Ensure existing styles remain */
+	.feature-container {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+
+	/* Update existing style */
+	.controls-container {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		padding: 8px 8px 8px 16px;
 	}
 </style>
 

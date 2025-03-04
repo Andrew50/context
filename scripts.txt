@@ -1,6 +1,5 @@
-list.svelte
-tasks/security.go
-quote.svelte
-
-
-
+input.svelte
+app/page.svelte
+chart.svelte
+chartContainer.svelte
+watchlist.svelte

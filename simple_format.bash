@@ -12,6 +12,26 @@ file_exists() {
     elif [[ -f "../$file_path" ]]; then
         echo "../$file_path"
         return 0
+    # Check if file exists in parent of current directory (dev)
+    elif [[ -f "../../$file_path" ]]; then
+        echo "../../$file_path"
+        return 0
+    # Check in direct parent directory with basename only
+    elif [[ -f "../$(basename "$file_path")" ]]; then
+        echo "../$(basename "$file_path")"
+        return 0
+    # Check in parent of parent with basename only
+    elif [[ -f "../../$(basename "$file_path")" ]]; then
+        echo "../../$(basename "$file_path")"
+        return 0
+    # Check if file exists in /home/aj/dev/ directory
+    elif [[ -f "/home/aj/dev/$file_path" ]]; then
+        echo "/home/aj/dev/$file_path"
+        return 0
+    # Check if file exists in /home/aj/dev/ with basename only
+    elif [[ -f "/home/aj/dev/$(basename "$file_path")" ]]; then
+        echo "/home/aj/dev/$(basename "$file_path")"
+        return 0
     # Check if file exists in study directory
     elif [[ -f "/home/aj/dev/study/$file_path" ]]; then
         echo "/home/aj/dev/study/$file_path"
@@ -20,6 +40,10 @@ file_exists() {
     elif [[ -f "/home/aj/dev/study/frontend/src/$file_path" ]]; then
         echo "/home/aj/dev/study/frontend/src/$file_path"
         return 0
+    # Check if file exists with just the filename in study directory
+    elif [[ -f "/home/aj/dev/study/$(basename "$file_path")" ]]; then
+        echo "/home/aj/dev/study/$(basename "$file_path")"
+        return 0
     # Check if file exists in actions-runner directory
     elif [[ -f "/home/aj/dev/actions-runner/_work/study/study/$file_path" ]]; then
         echo "/home/aj/dev/actions-runner/_work/study/study/$file_path"
@@ -27,6 +51,10 @@ file_exists() {
     # Check if file exists in actions-runner frontend/src directory
     elif [[ -f "/home/aj/dev/actions-runner/_work/study/study/frontend/src/$file_path" ]]; then
         echo "/home/aj/dev/actions-runner/_work/study/study/frontend/src/$file_path"
+        return 0
+    # Check if file exists with just the filename in actions-runner directory
+    elif [[ -f "/home/aj/dev/actions-runner/_work/study/study/$(basename "$file_path")" ]]; then
+        echo "/home/aj/dev/actions-runner/_work/study/study/$(basename "$file_path")"
         return 0
     # Special case for input.svelte
     elif [[ "$file_path" == *"input.svelte"* || "$file_path" == "lib/utils/popups/input.svelte" ]]; then
@@ -46,29 +74,65 @@ file_exists() {
 find_file_fuzzy() {
     local search_term="$1"
     local found_file=""
+    local base_name=$(basename "$search_term")
     
-    # Try to find in current and parent directories
-    found_file=$(find . .. -type f -name "*${search_term}*" 2>/dev/null | grep -v "node_modules" | grep -v ".git" | head -1)
+    # Try parent directory (dev) first
+    found_file=$(find .. -maxdepth 3 -type f -name "*${search_term}*" 2>/dev/null | grep -v "node_modules" | grep -v ".git" | head -1)
     if [[ -n "$found_file" ]]; then
         echo "$found_file"
         return 0
     fi
     
-    # Try case-insensitive search
-    found_file=$(find . .. -type f -iname "*${search_term}*" 2>/dev/null | grep -v "node_modules" | grep -v ".git" | head -1)
+    # Try parent directory with basename only
+    found_file=$(find .. -maxdepth 3 -type f -name "*${base_name}*" 2>/dev/null | grep -v "node_modules" | grep -v ".git" | head -1)
     if [[ -n "$found_file" ]]; then
         echo "$found_file"
         return 0
     fi
     
-    # Try in study directory
+    # Try to find in current directory
+    found_file=$(find . -type f -name "*${search_term}*" 2>/dev/null | grep -v "node_modules" | grep -v ".git" | head -1)
+    if [[ -n "$found_file" ]]; then
+        echo "$found_file"
+        return 0
+    fi
+    
+    # Try case-insensitive search in parent directory
+    found_file=$(find .. -maxdepth 3 -type f -iname "*${search_term}*" 2>/dev/null | grep -v "node_modules" | grep -v ".git" | head -1)
+    if [[ -n "$found_file" ]]; then
+        echo "$found_file"
+        return 0
+    fi
+    
+    # Try in /home/aj/dev directory directly
+    found_file=$(find /home/aj/dev -maxdepth 2 -type f -name "*${base_name}*" 2>/dev/null | grep -v "node_modules" | grep -v ".git" | head -1)
+    if [[ -n "$found_file" ]]; then
+        echo "$found_file"
+        return 0
+    fi
+    
+    # Try in study directory - search by basename too
+    found_file=$(find /home/aj/dev/study -type f -name "*${base_name}*" 2>/dev/null | grep -v "node_modules" | grep -v ".git" | head -1)
+    if [[ -n "$found_file" ]]; then
+        echo "$found_file"
+        return 0
+    fi
+    
+    # Try in study directory with full path
     found_file=$(find /home/aj/dev/study -type f -name "*${search_term}*" 2>/dev/null | grep -v "node_modules" | grep -v ".git" | head -1)
     if [[ -n "$found_file" ]]; then
         echo "$found_file"
         return 0
     fi
     
-    # Try in actions-runner directory
+    # Try in actions-runner directory - search by basename too
+    found_file=$(find /home/aj/dev/actions-runner/_work/study/study -type f -name "*${base_name}*" 2>/dev/null | grep -v "node_modules" | grep -v ".git" | head -1)
+    if [[ -n "$found_file" ]]; then
+        echo "$found_file"
+        return 0
+    fi
+    
+    # Try in actions-runner directory with full path
     found_file=$(find /home/aj/dev/actions-runner/_work/study/study -type f -name "*${search_term}*" 2>/dev/null | grep -v "node_modules" | grep -v ".git" | head -1)
     if [[ -n "$found_file" ]]; then
         echo "$found_file"
@@ -102,21 +166,14 @@ generate_context() {
     echo "## Current File" >> "$OUTPUT_FILE"
     echo "Here is the file I'm looking at. It might be truncated from above and below and, if so, is centered around my cursor." >> "$OUTPUT_FILE"
 
-    # Process each file in scripts.txt for the code block header
-    while IFS= read -r file_path; do
-        # Skip empty lines and comments
-        [[ -z "$file_path" || "$file_path" =~ ^#.*$ ]] && continue
-        
-        # Add file path as a code block header
-        echo "\`\`\`${file_path}" >> "$OUTPUT_FILE"
-        echo "" >> "$OUTPUT_FILE"
-        echo "" >> "$OUTPUT_FILE"
-    done < "scripts.txt"
-
     echo "" >> "$OUTPUT_FILE"
     echo "<potential_codebase_context>" >> "$OUTPUT_FILE"
     echo "## Potentially Relevant Code Snippets from the current Codebase" >> "$OUTPUT_FILE"
 
+    # Counters for stats
+    found_count=0
+    not_found_count=0
+    
     # Add actual file contents
     while IFS= read -r file_path; do
         # Skip empty lines and comments
@@ -125,23 +182,32 @@ generate_context() {
         # First try direct file existence check
         found_path=$(file_exists "$file_path")
         if [ $? -eq 0 ]; then
+            # Only add the file header for found files
             echo "" >> "$OUTPUT_FILE"
+            echo "\`\`\`${file_path}" >> "$OUTPUT_FILE"
             echo "<file>${found_path}</file>" >> "$OUTPUT_FILE"
             cat "$found_path" >> "$OUTPUT_FILE"
             echo "" >> "$OUTPUT_FILE"
+            echo "\`\`\`" >> "$OUTPUT_FILE"
             echo "Found file: $found_path"
+            ((found_count++))
         else
             # If not found directly, try fuzzy search
             echo "File not found directly, trying fuzzy search for: $file_path"
             found_path=$(find_file_fuzzy "$file_path")
             if [ $? -eq 0 ]; then
+                # Only add the file header for found files
                 echo "" >> "$OUTPUT_FILE"
+                echo "\`\`\`${file_path}" >> "$OUTPUT_FILE"
                 echo "<file>${found_path}</file>" >> "$OUTPUT_FILE"
                 cat "$found_path" >> "$OUTPUT_FILE"
                 echo "" >> "$OUTPUT_FILE"
+                echo "\`\`\`" >> "$OUTPUT_FILE"
                 echo "Found file via fuzzy search: $found_path"
+                ((found_count++))
             else
-                echo "Warning: File not found: $file_path" >&2
+                echo "Warning: File not found: $file_path. Try different paths or check file location." >&2
+                ((not_found_count++))
             fi
         fi
     done < "scripts.txt"
@@ -149,6 +215,9 @@ generate_context() {
     echo "" >> "$OUTPUT_FILE"
     echo "</potential_codebase_context>" >> "$OUTPUT_FILE"
 
+    echo "Context generation summary:"
+    echo "- Files found: $found_count"
+    echo "- Files not found: $not_found_count"
     echo "Context file generated as $OUTPUT_FILE"
 }
 

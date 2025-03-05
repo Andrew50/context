@@ -2,2408 +2,3656 @@
 
 ## Current File
 Here is the file I'm looking at. It might be truncated from above and below and, if so, is centered around my cursor.
-```input.svelte
-
-
-```app/page.svelte
-
-
-```chart.svelte
-
-
-```chartContainer.svelte
-
-
-```watchlist.svelte
-
-
 
 <potential_codebase_context>
 ## Potentially Relevant Code Snippets from the current Codebase
 
-<file>/home/aj/dev/study/frontend/src/lib/utils/popups/input.svelte</file>
-<!-- instance.svelte -->
-<script lang="ts" context="module">
-	import '$lib/core/global.css';
-	import { privateRequest } from '$lib/core/backend';
-	import { get, writable } from 'svelte/store';
-	import { parse } from 'date-fns';
-	import { tick } from 'svelte';
-	import type { Writable } from 'svelte/store';
+```study/account.svelte
+<file>/home/aj/dev/study/services/frontend/src/lib/features/account.svelte</file>
+<script lang="ts">
+	import { privateFileRequest } from '$lib/core/backend';
+	import { queueRequest } from '$lib/core/backend';
 	import type { Instance } from '$lib/core/types';
-
-	/**
-	 * Simplified Focus Management Strategy:
-	 * 1. When input component is activated, we store the previously focused element
-	 * 2. We focus the input window itself and handle keyboard events directly
-	 * 3. When input is completed or cancelled, we restore focus to the previously focused element
-	 * 4. We clean up all event listeners when the component is destroyed or deactivated
-	 */
-
-	const allKeys = ['ticker', 'timestamp', 'timeframe', 'extendedHours', 'price'] as const;
-	let currentSecurityResultRequest = 0;
-
-	type InstanceAttributes = (typeof allKeys)[number];
-	let filterOptions = [];
-	let loadedSecurityResultRequest = -1;
-	privateRequest<[]>('getSecurityClassifications', {}).then((v: []) => {
-		filterOptions = v;
-	});
-	interface InputQuery {
-		// 'inactive': no UI shown
-		// 'initializing' setting up event handlers
-		// 'active': window is open waiting for input
-		// 'complete': one field completed (may still be active if more required)
-		// 'cancelled': user cancelled via Escape
-		// 'shutdown': about to close and reset to inactive
-		status: 'inactive' | 'initializing' | 'active' | 'complete' | 'cancelled' | 'shutdown';
-		inputString: string;
-		inputType: string;
-		inputValid: boolean;
-		instance: Instance;
-		requiredKeys: InstanceAttributes[] | 'any';
-		possibleKeys: InstanceAttributes[];
-		securities?: Instance[];
-	}
-
-	const inactiveInputQuery: InputQuery = {
-		status: 'inactive',
-		inputString: '',
-		inputValid: true,
-		inputType: '',
-		requiredKeys: 'any',
-		possibleKeys: [],
-		instance: {}
-	};
-	export const inputQuery: Writable<InputQuery> = writable({ ...inactiveInputQuery });
-
-	// Hold the reject function of the currently active promise (if any)
-	let activePromiseReject: ((reason?: any) => void) | null = null;
-
-	// Modified queryInstanceInput: if called while another query is active,
-	// cancel the previous query (rejecting its promise) and reset the state.
-	export async function queryInstanceInput(
-		requiredKeys: InstanceAttributes[] | 'any',
-		optionalKeys: InstanceAttributes[] | 'any',
-		instance: Instance = {}
-	): Promise<Instance> {
-		// If an input query is already active, force its cancellation.
-		if (get(inputQuery).status !== 'inactive') {
-			if (activePromiseReject) {
-				activePromiseReject(new Error('User cancelled input'));
-				activePromiseReject = null;
-			}
-			inputQuery.update((q) => ({ ...inactiveInputQuery }));
-			// Optionally wait a tick for the UI to update.
-			await tick();
-		}
-
-		// Determine possible keys.
-		let possibleKeys: InstanceAttributes[];
-		if (optionalKeys === 'any') {
-			possibleKeys = [...allKeys];
-		} else {
-			possibleKeys = Array.from(
-				new Set([...requiredKeys, ...optionalKeys])
-			) as InstanceAttributes[];
-		}
-		await tick();
-
-		// Check if there's an initial inputString in the instance
-		const initialInputString =
-			'inputString' in instance && instance['inputString'] != null
-				? String(instance['inputString'])
-				: '';
-		// Remove inputString property (not part of the Instance interface)
-		if ('inputString' in instance) {
-			const instanceAny = instance as any;
-			delete instanceAny.inputString;
-		}
-
-		// Initialize the query with passed instance info.
-		inputQuery.update((v: InputQuery) => ({
-			...v,
-			requiredKeys,
-			possibleKeys,
-			instance,
-			inputString: initialInputString, // Use the initial input string if provided
-			status: 'initializing'
-		}));
-
-		// Return a new promise that resolves when input is complete or rejects on cancellation.
-		return new Promise<Instance>((resolve, reject) => {
-			// Save the reject function so a subsequent call can cancel this query.
-			activePromiseReject = reject;
-
-			const unsubscribe = inputQuery.subscribe((iQ: InputQuery) => {
-				if (iQ.status === 'cancelled') {
-					cleanup();
-					reject(new Error('User cancelled input'));
-				} else if (iQ.status === 'complete') {
-					const result = iQ.instance;
-					cleanup();
-					resolve(result);
-				}
-			});
-
-			function cleanup() {
-				unsubscribe();
-				activePromiseReject = null;
-				// Trigger a shutdown to reset state.
-				inputQuery.update((v: InputQuery) => ({ ...v, status: 'shutdown' }));
-			}
-		});
-	}
-</script>
-
-<script lang="ts">
-	import { browser } from '$app/environment';
-	import { onDestroy, onMount } from 'svelte';
-	import { ESTStringToUTCTimestamp, UTCTimestampToESTString } from '$lib/core/timestamp';
-	
-	// Track the previously focused element
-	let prevFocusedElement: HTMLElement | null = null;
-	let inputWindowElement: HTMLDivElement;
-	let isLoadingSecurities = false;
-	let manualInputType: string = 'auto';
-
-	// Add this reactive statement
-	$: if (manualInputType !== 'auto' && $inputQuery.status === 'active') {
-		inputQuery.update((v) => ({
-			...v,
-			inputType: manualInputType
-		}));
-	}
-
-	interface ValidateResponse {
-		inputValid: boolean;
-		securities: Instance[];
-	}
-
-	async function validateInput(inputString: string, inputType: string): Promise<ValidateResponse> {
-		if (inputType === 'ticker') {
-			isLoadingSecurities = true;
-			try {
-				const securities = await privateRequest<Instance[]>('getSecuritiesFromTicker', {
-					ticker: inputString
-				});
-				if (Array.isArray(securities) && securities.length > 0) {
-					return {
-						inputValid: true,
-						securities: securities
-					};
-				}
-				return { inputValid: false, securities: [] };
-			} finally {
-				isLoadingSecurities = false;
-			}
-		} else if (inputType === 'timeframe') {
-			const regex = /^\d{1,3}[yqmwhds]?$/i;
-			return { inputValid: regex.test(inputString), securities: [] };
-		} else if (inputType === 'timestamp') {
-			const formats = ['yyyy-MM-dd H:m:ss', 'yyyy-MM-dd H:m', 'yyyy-MM-dd H', 'yyyy-MM-dd'];
-			for (const format of formats) {
-				try {
-					const parsedDate = parse(inputString, format, new Date());
-					if (!isNaN(parsedDate.getTime())) {
-						return { inputValid: true, securities: [] };
-					}
-				} catch {
-					/* try next format */
-				}
-			}
-			return { inputValid: false, securities: [] };
-		} else if (inputType === 'price') {
-			const price = parseFloat(inputString);
-			return { inputValid: !isNaN(price) && price > 0, securities: [] };
-		}
-		return { inputValid: false, securities: [] };
-	}
-
-	async function waitForSecurityResult(): Promise<void> {
-		return new Promise((resolve) => {
-			const check = () => {
-				if (loadedSecurityResultRequest === currentSecurityResultRequest) {
-					resolve();
-				} else {
-					// Check again after 50ms (or adjust as needed)
-					setTimeout(check, 50);
-				}
-			};
-			check();
-		});
-	}
-
-	async function enterInput(iQ: InputQuery, tickerIndex: number = 0): Promise<InputQuery> {
-		if (iQ.inputType === 'ticker') {
-			const ts = iQ.instance.timestamp;
-			await waitForSecurityResult();
-			iQ = $inputQuery;
-			if (Array.isArray(iQ.securities) && iQ.securities.length > 0) {
-				iQ.instance = { ...iQ.instance, ...iQ.securities[tickerIndex] };
-				iQ.instance.timestamp = ts;
-			}
-		} else if (iQ.inputType === 'timeframe') {
-			iQ.instance.timeframe = iQ.inputString;
-		} else if (iQ.inputType === 'timestamp') {
-			iQ.instance.timestamp = ESTStringToUTCTimestamp(iQ.inputString);
-		} else if (iQ.inputType === 'price') {
-			iQ.instance.price = parseFloat(iQ.inputString);
-		}
-		// Mark as complete but then check if further input is needed.
-		iQ.status = 'complete';
-		if (iQ.requiredKeys === 'any') {
-			if (Object.keys(iQ.instance).length === 0) {
-				iQ.status = 'active';
-			}
-		} else {
-			for (const attribute of iQ.requiredKeys) {
-				if (!iQ.instance[attribute]) {
-					iQ.status = 'active';
-					break;
-				}
-			}
-		}
-		iQ.inputString = '';
-		iQ.inputType = '';
-		iQ.inputValid = true;
-		// Reset manualInputType to auto after input is entered
-		manualInputType = 'auto';
-		return iQ;
-	}
-
-	// Handle keyboard input directly on the input window
-	async function handleKeyDown(event: KeyboardEvent): Promise<void> {
-		// Get current state directly from the store to ensure we have latest state
-		const currentState = get(inputQuery);
-
-		// Make sure we're in active state
-		if (currentState.status !== 'active') {
-			return;
-		}
-
-		// Always prevent default behavior for our captured keys to avoid browser handling
-		if (
-			event.key === 'Enter' ||
-			event.key === 'Tab' ||
-			event.key === 'Escape' ||
-			/^[a-zA-Z0-9]$/.test(event.key) ||
-			/[-:.]/.test(event.key) ||
-			(event.key === ' ' && currentState.inputType === 'timestamp') ||
-			event.key === 'Backspace'
-		) {
-			event.preventDefault();
-		}
-
-		// Stop propagation to prevent double-handling
-		event.stopPropagation();
-
-		let iQ = { ...currentState };
-		if (event.key === 'Escape') {
-			inputQuery.update((q) => ({ ...q, status: 'cancelled' }));
-			return;
-		} else if (event.key === 'Enter') {
-			if (iQ.inputValid) {
-				const updatedQuery = await enterInput(iQ, 0);
-				inputQuery.set(updatedQuery);
-			}
-			return;
-		} else if (event.key === 'Tab') {
-			inputQuery.update((q) => ({
-				...q,
-				instance: { ...q.instance, extendedHours: !q.instance.extendedHours }
-			}));
-			return;
-		}
-
-		// Process input keys
-		if (
-			/^[a-zA-Z0-9]$/.test(event.key) ||
-			/[-:.]/.test(event.key) ||
-			(event.key === ' ' && iQ.inputType === 'timestamp')
-		) {
-			// Transform the key based on input type
-			const key = iQ.inputType === 'timeframe' ? event.key : event.key.toUpperCase();
-			const newInputString = iQ.inputString + key;
-
-			// Update inputString immediately
-			inputQuery.update((v) => ({
-				...v,
-				inputString: newInputString
-			}));
-
-			// Then determine input type
-			determineInputType(newInputString);
-		} else if (event.key === 'Backspace') {
-			const newInputString = iQ.inputString.slice(0, -1);
-
-			// Update inputString immediately
-			inputQuery.update((v) => ({
-				...v,
-				inputString: newInputString
-			}));
-
-			// Then determine input type
-			determineInputType(newInputString);
-		}
-	}
-
-	function determineInputType(inputString: string): void {
-		const iQ = get(inputQuery);
-		let inputType = iQ.inputType;
-
-		// Only auto-classify if manualInputType is set to 'auto'
-		if (manualInputType === 'auto') {
-			if (inputString !== '') {
-				if (iQ.possibleKeys.includes('ticker') && /^[A-Z]$/.test(inputString)) {
-					inputType = 'ticker';
-				} else if (iQ.possibleKeys.includes('price') && /^(?:\d*\.\d+|\d{3,})$/.test(inputString)) {
-					inputType = 'price';
-				} else if (
-					iQ.possibleKeys.includes('timeframe') &&
-					/^\d{1,2}[hdwmqs]?$/i.test(inputString)
-				) {
-					inputType = 'timeframe';
-				} else if (iQ.possibleKeys.includes('timestamp') && /^[\d-]+$/.test(inputString)) {
-					inputType = 'timestamp';
-				} else if (iQ.possibleKeys.includes('ticker')) {
-					inputType = 'ticker';
-				} else {
-					inputType = '';
-				}
-			} else {
-				inputType = '';
-			}
-		} else {
-			// Use the manually selected input type
-			inputType = manualInputType;
-		}
-
-		// Update the input type
-		inputQuery.update((v) => ({
-			...v,
-			inputType
-		}));
-
-		// Trigger validation
-		currentSecurityResultRequest++;
-		const thisSecurityResultRequest = currentSecurityResultRequest;
-		validateInput(inputString, inputType).then((validationResp: ValidateResponse) => {
-			if (thisSecurityResultRequest === currentSecurityResultRequest) {
-				inputQuery.update((v: InputQuery) => ({
-					...v,
-					...validationResp
-				}));
-				loadedSecurityResultRequest = thisSecurityResultRequest;
-			}
-		});
-	}
-
-	// Handle clicks outside the popup to close it
-	function handleOutsideClick(event: MouseEvent) {
-		const inputWindow = document.getElementById('input-window');
-		if (!inputWindow || !inputWindow.contains(event.target as Node)) {
-			inputQuery.update((v) => ({ ...v, status: 'cancelled' }));
-		}
-	}
-
-	function closeWindow() {
-		inputQuery.update((v) => ({ ...v, status: 'cancelled' }));
-	}
-
-	let sectors: string[] = [];
-	let industries: string[] = [];
-	function capitalize(str: string, lower = false): string {
-		return (lower ? str.toLowerCase() : str).replace(/(?:^|\s|["'([{])+\S/g, (match: string) =>
-			match.toUpperCase()
-		);
-	}
-
-	function formatTimeframe(timeframe: string): string {
-		const match = timeframe.match(/^(\d+)([dwmsh]?)$/i) ?? null;
-		let result = timeframe;
-		if (match) {
-			switch (match[2]) {
-				case 'd':
-					result = `${match[1]} days`;
-					break;
-				case 'w':
-					result = `${match[1]} weeks`;
-					break;
-				case 'm':
-					result = `${match[1]} months`;
-					break;
-				case 'h':
-					result = `${match[1]} hours`;
-					break;
-				case 's':
-					result = `${match[1]} seconds`;
-					break;
-				default:
-					result = `${match[1]} minutes`;
-					break;
-			}
-			if (match[1] === '1') {
-				result = result.slice(0, -1);
-			}
-		}
-		return result;
-	}
-
-	onMount(() => {
-		// Store the currently focused element
-		prevFocusedElement = document.activeElement as HTMLElement;
-
-		const unsubscribe = inputQuery.subscribe((v: InputQuery) => {
-			if (browser) {
-				if (v.status === 'initializing') {
-					// Store focused element before showing the popup
-					prevFocusedElement = document.activeElement as HTMLElement;
-                    
-                    // Mark the UI as active now
-                    inputQuery.update((state) => ({ ...state, status: 'active' }));
-                    
-                    // Focus the input window after it renders
-                    tick().then(() => {
-                        // Focus the input window itself (will receive keyboard events)
-                        if (inputWindowElement) {
-                            inputWindowElement.focus();
-                        }
-                        
-                        // Add a click handler to the document to detect clicks outside the popup
-                        document.addEventListener('mousedown', handleOutsideClick);
-                    });
-				} else if (v.status === 'shutdown' || v.status === 'cancelled') {
-					// Remove document click handler
-					document.removeEventListener('mousedown', handleOutsideClick);
-					
-					// Restore focus to the previously focused element
-					if (prevFocusedElement) {
-                        tick().then(() => {
-                            prevFocusedElement?.focus();
-                            
-                            if (v.status === 'shutdown') {
-                                // Reset to inactive only after focus is restored
-                                inputQuery.update((state) => ({ ...state, status: 'inactive', inputString: '' }));
-                            }
-                        });
-					} else if (v.status === 'shutdown') {
-                        // Reset to inactive if there was no previous element
-                        inputQuery.update((state) => ({ ...state, status: 'inactive', inputString: '' }));
-                    }
-				}
-			}
-		});
-
-		type SecurityClassifications = {
-			sectors: string[];
-			industries: string[];
-		};
-		privateRequest<SecurityClassifications>('getSecurityClassifications', {}, false).then(
-			(classifications: SecurityClassifications) => {
-				sectors = classifications.sectors;
-				industries = classifications.industries;
-			}
-		);
-		
-		return () => {
-			unsubscribe();
-		};
-	});
-
-	onDestroy(() => {
-		// Clean up any remaining event listeners
-		document.removeEventListener('mousedown', handleOutsideClick);
-	});
-	
-	function displayValue(q: InputQuery, key: string): string {
-		if (key === q.inputType) {
-			return q.inputString;
-		} else if (key in q.instance) {
-			if (key === 'timestamp') {
-				return UTCTimestampToESTString(q.instance.timestamp ?? 0);
-			} else if (key === 'extendedHours') {
-				return q.instance.extendedHours ? 'True' : 'False';
-			} else if (key === 'price') {
-				return '$' + String(q.instance.price);
-			} else {
-				return String(q.instance[key as keyof Instance]);
-			}
-		}
-		return '';
-	}
-</script>
-
-{#if $inputQuery.status === 'active' || $inputQuery.status === 'initializing'}
-	<div
-		class="popup-container"
-		id="input-window"
-		bind:this={inputWindowElement}
-		tabindex="0"
-		on:keydown={handleKeyDown}
-	>
-		<div class="header">
-			<div class="title">{capitalize($inputQuery.inputType)} Input</div>
-			<div class="field-select">
-				<span class="label">Field:</span>
-				<select
-					class="default-select"
-					bind:value={manualInputType}
-					on:click|stopPropagation
-					on:change|stopPropagation
-				>
-					<option value="auto">Auto</option>
-					{#each $inputQuery.possibleKeys as key}
-						<option value={key}>{capitalize(key)}</option>
-					{/each}
-				</select>
-			</div>
-			<button class="utility-button" on:click|stopPropagation={closeWindow}>×</button>
-		</div>
-
-		<div class="search-bar">
-			<input type="text" placeholder="Enter Value" value={$inputQuery.inputString} readonly />
-		</div>
-		<div class="content-container">
-			{#if $inputQuery.instance && Object.keys($inputQuery.instance).length > 0}
-				{#if $inputQuery.inputType === ''}
-					<div class="span-container">
-						{#each $inputQuery.possibleKeys as key}
-							<div class="span-row">
-								<span
-									class={$inputQuery.requiredKeys !== 'any' &&
-									$inputQuery.requiredKeys.includes(key) &&
-									!$inputQuery.instance[key]
-										? 'red'
-										: ''}
-								>
-									{capitalize(key)}
-								</span>
-								<span class="value">
-									{displayValue($inputQuery, key)}
-								</span>
-							</div>
-						{/each}
-					</div>
-				{:else if $inputQuery.inputType === 'ticker'}
-					<div class="table-container">
-						{#if isLoadingSecurities}
-							<div class="loading-container">
-								<div class="loading-spinner"></div>
-								<span class="label">Loading securities...</span>
-							</div>
-						{:else if Array.isArray($inputQuery.securities) && $inputQuery.securities.length > 0}
-							<table>
-								<tbody>
-									{#each $inputQuery.securities as sec, i}
-										<tr
-											on:click={async () => {
-												const updatedQuery = await enterInput($inputQuery, i);
-												inputQuery.set(updatedQuery);
-											}}
-										>
-											<td class="defalt-td">
-												<div
-													style="background-color: transparent; width: 100px; height: 30px; display: flex; align-items: center; justify-content: center;"
-												>
-													{#if sec.icon}
-														<img
-															src={`data:image/jpeg;base64,${sec.icon}`}
-															alt="Security Image"
-															style="max-width: 100%; max-height: 100%; object-fit: contain;"
-														/>
-													{/if}
-												</div>
-											</td>
-											<td class="defalt-td">{sec.ticker}</td>
-											<td class="defalt-td">{sec.name}</td>
-											<td class="defalt-td"
-												>{sec.timestamp !== undefined
-													? UTCTimestampToESTString(sec.timestamp)
-													: ''}</td
-											>
-										</tr>
-									{/each}
-								</tbody>
-							</table>
-						{/if}
-					</div>
-				{:else if $inputQuery.inputType === 'timestamp'}
-					<div class="span-container">
-						<div class="span-row">
-							<span class="label">Timestamp</span>
-							<input
-								type="datetime-local"
-								on:change={(e) => {
-									// Use type casting in a different way that works better with Svelte compiler
-									const target = e.target;
-									const inputValue = target && 'value' in target ? String(target.value) : '';
-									const date = new Date(inputValue);
-									inputQuery.update((q) => ({
-										...q,
-										instance: {
-											...q.instance,
-											timestamp: !isNaN(date.getTime()) ? date.getTime() : q.instance.timestamp
-										},
-										inputValid: !isNaN(date.getTime())
-									}));
-								}}
-							/>
-						</div>
-					</div>
-				{:else if $inputQuery.inputType === 'timeframe'}
-					<div class="span-container">
-						<div class="span-row">
-							<span class="label">Timeframe</span>
-							<span class="value">{formatTimeframe($inputQuery.inputString)}</span>
-						</div>
-					</div>
-				{:else if $inputQuery.inputType === 'extendedHours'}
-					<div class="span-container">
-						<div class="span-row">
-							<span class="label">Extended Hours</span>
-							<span class="value">{$inputQuery.instance.extendedHours ? 'True' : 'False'}</span>
-						</div>
-					</div>
-					0
-				{/if}
-			{/if}
-		</div>
-	</div>
-{/if}
-
-<style>
-	.popup-container {
-		width: 700px;
-		height: 600px;
-		background: var(--ui-bg-primary);
-		border: 1px solid var(--ui-border);
-		border-radius: 8px;
-		display: flex;
-		flex-direction: column;
-		overflow: hidden;
-		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
-		position: fixed;
-		top: 50%;
-		left: 50%;
-		transform: translate(-50%, -50%);
-		z-index: 9999;
-	}
-	.span-container {
-		display: felx;
-		flex-direction: column;
-		gap: 8px;
-		width: 100%;
-	}
-	.span-container span {
-		align-items: top;
-		display: block;
-		flex-direction: row;
-		width: 100%;
-		font-size: 30px;
-	}
-	.span-row {
-		/* Each row is a flex container, left label and right value */
-		display: flex;
-		flex-direction: row;
-		justify-content: space-between;
-		/* optionally align items on the baseline or center */
-		align-items: baseline;
-	}
-
-	.span-row span {
-		/* Let it inherit the global font instead of forcing a size */
-		font-size: inherit;
-	}
-
-	.header {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		padding: 8px 12px;
-		border-bottom: 1px solid var(--ui-border);
-		height: 40px;
-	}
-
-	.title {
-		font-size: 16px;
-		font-weight: 500;
-		color: var(--text-primary);
-	}
-
-	.search-bar {
-		padding: 8px 12px;
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		border-bottom: 1px solid var(--ui-border);
-		height: 48px;
-		position: relative;
-	}
-
-	.search-bar input {
-		flex: 1;
-		background: var(--ui-bg-element);
-		border: 1px solid var(--ui-border);
-		padding: 6px 10px;
-		color: var(--text-primary);
-		border-radius: 4px;
-	}
-
-	.search-icon {
-		color: var(--text-secondary);
-	}
-
-	.filters {
-		padding: 4px 8px;
-		display: flex;
-		gap: 4px;
-		flex-wrap: wrap;
-		border-bottom: 1px solid var(--ui-border);
-		height: auto;
-		max-height: 80px;
-		overflow-y: auto;
-	}
-
-	.filter-bubble {
-		background: transparent;
-		border: 1px solid var(--ui-border);
-		color: var(--text-secondary);
-		padding: 2px 8px;
-		border-radius: 8px;
-		font-size: 10px;
-		cursor: pointer;
-		transition: all 0.2s;
-	}
-
-	.filter-bubble.active {
-		background: var(--ui-accent);
-		border-color: var(--ui-accent);
-		color: var(--text-primary);
-	}
-
-	.content-container {
-		flex: 1;
-		overflow-y: auto;
-		padding: 12px;
-	}
-
-	.field-select {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		margin-left: auto;
-	}
-
-	.field-select span {
-		color: var(--text-secondary);
-		font-size: 14px;
-	}
-	
-	.loading-spinner {
-		width: 30px;
-		height: 30px;
-		border: 3px solid var(--ui-border);
-		border-top: 3px solid var(--text-primary);
-		border-radius: 50%;
-		animation: spin 1s linear infinite;
-		margin-bottom: 10px;
-	}
-	.security-item {
-		display: flex;
-		align-items: center;
-		padding: 8px 12px;
-		cursor: pointer;
-		border-bottom: 1px solid var(--ui-border);
-		height: 40px;
-	}
-
-	.security-item:hover {
-		background: var(--ui-bg-hover);
-	}
-
-	.security-icon {
-		margin-right: 12px;
-		width: 24px;
-		height: 24px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-	}
-
-	.security-icon img {
-		width: 28px;
-		height: 28px;
-		object-fit: contain;
-	}
-
-	.security-info {
-		flex: 1;
-		display: flex;
-		flex-direction: row;
-		align-items: center;
-		gap: 12px;
-	}
-
-	.security-main {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		flex: 1;
-	}
-
-	.ticker {
-		font-weight: 600;
-		color: var(--text-primary);
-		min-width: 60px;
-		font-size: 0.9em;
-	}
-
-	.name {
-		color: var(--text-secondary);
-		font-size: 0.85em;
-		flex: 1;
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-
-	.security-details {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		flex: 1;
-		color: var(--text-secondary);
-		font-size: 0.8em;
-		margin-left: auto;
-	}
-
-	.sector {
-		color: var(--text-secondary);
-		font-size: 0.8em;
-		margin-right: 8px;
-	}
-
-	.exchange {
-		color: var(--text-secondary);
-		font-size: 0.8em;
-		min-width: 50px;
-	}
-
-	.date {
-		color: var(--text-secondary);
-		align-items: center;
-		justify-content: center;
-		padding: 20px;
-	}
-</style>
-
-
-<file>/home/aj/dev/study/frontend/src/lib/utils/popups/input.svelte</file>
-<!-- instance.svelte -->
-<script lang="ts" context="module">
-	import '$lib/core/global.css';
-	import { privateRequest } from '$lib/core/backend';
-	import { get, writable } from 'svelte/store';
-	import { parse } from 'date-fns';
-	import { tick } from 'svelte';
-	import type { Writable } from 'svelte/store';
-	import type { Instance } from '$lib/core/types';
-
-	/**
-	 * Simplified Focus Management Strategy:
-	 * 1. When input component is activated, we store the previously focused element
-	 * 2. We focus the input window itself and handle keyboard events directly
-	 * 3. When input is completed or cancelled, we restore focus to the previously focused element
-	 * 4. We clean up all event listeners when the component is destroyed or deactivated
-	 */
-
-	const allKeys = ['ticker', 'timestamp', 'timeframe', 'extendedHours', 'price'] as const;
-	let currentSecurityResultRequest = 0;
-
-	type InstanceAttributes = (typeof allKeys)[number];
-	let filterOptions = [];
-	let loadedSecurityResultRequest = -1;
-	privateRequest<[]>('getSecurityClassifications', {}).then((v: []) => {
-		filterOptions = v;
-	});
-	interface InputQuery {
-		// 'inactive': no UI shown
-		// 'initializing' setting up event handlers
-		// 'active': window is open waiting for input
-		// 'complete': one field completed (may still be active if more required)
-		// 'cancelled': user cancelled via Escape
-		// 'shutdown': about to close and reset to inactive
-		status: 'inactive' | 'initializing' | 'active' | 'complete' | 'cancelled' | 'shutdown';
-		inputString: string;
-		inputType: string;
-		inputValid: boolean;
-		instance: Instance;
-		requiredKeys: InstanceAttributes[] | 'any';
-		possibleKeys: InstanceAttributes[];
-		securities?: Instance[];
-	}
-
-	const inactiveInputQuery: InputQuery = {
-		status: 'inactive',
-		inputString: '',
-		inputValid: true,
-		inputType: '',
-		requiredKeys: 'any',
-		possibleKeys: [],
-		instance: {}
-	};
-	export const inputQuery: Writable<InputQuery> = writable({ ...inactiveInputQuery });
-
-	// Hold the reject function of the currently active promise (if any)
-	let activePromiseReject: ((reason?: any) => void) | null = null;
-
-	// Modified queryInstanceInput: if called while another query is active,
-	// cancel the previous query (rejecting its promise) and reset the state.
-	export async function queryInstanceInput(
-		requiredKeys: InstanceAttributes[] | 'any',
-		optionalKeys: InstanceAttributes[] | 'any',
-		instance: Instance = {}
-	): Promise<Instance> {
-		// If an input query is already active, force its cancellation.
-		if (get(inputQuery).status !== 'inactive') {
-			if (activePromiseReject) {
-				activePromiseReject(new Error('User cancelled input'));
-				activePromiseReject = null;
-			}
-			inputQuery.update((q) => ({ ...inactiveInputQuery }));
-			// Optionally wait a tick for the UI to update.
-			await tick();
-		}
-
-		// Determine possible keys.
-		let possibleKeys: InstanceAttributes[];
-		if (optionalKeys === 'any') {
-			possibleKeys = [...allKeys];
-		} else {
-			possibleKeys = Array.from(
-				new Set([...requiredKeys, ...optionalKeys])
-			) as InstanceAttributes[];
-		}
-		await tick();
-
-		// Check if there's an initial inputString in the instance
-		const initialInputString =
-			'inputString' in instance && instance['inputString'] != null
-				? String(instance['inputString'])
-				: '';
-		// Remove inputString property (not part of the Instance interface)
-		if ('inputString' in instance) {
-			const instanceAny = instance as any;
-			delete instanceAny.inputString;
-		}
-
-		// Initialize the query with passed instance info.
-		inputQuery.update((v: InputQuery) => ({
-			...v,
-			requiredKeys,
-			possibleKeys,
-			instance,
-			inputString: initialInputString, // Use the initial input string if provided
-			status: 'initializing'
-		}));
-
-		// Return a new promise that resolves when input is complete or rejects on cancellation.
-		return new Promise<Instance>((resolve, reject) => {
-			// Save the reject function so a subsequent call can cancel this query.
-			activePromiseReject = reject;
-
-			const unsubscribe = inputQuery.subscribe((iQ: InputQuery) => {
-				if (iQ.status === 'cancelled') {
-					cleanup();
-					reject(new Error('User cancelled input'));
-				} else if (iQ.status === 'complete') {
-					const result = iQ.instance;
-					cleanup();
-					resolve(result);
-				}
-			});
-
-			function cleanup() {
-				unsubscribe();
-				activePromiseReject = null;
-				// Trigger a shutdown to reset state.
-				inputQuery.update((v: InputQuery) => ({ ...v, status: 'shutdown' }));
-			}
-		});
-	}
-</script>
-
-<script lang="ts">
-	import { browser } from '$app/environment';
-	import { onDestroy, onMount } from 'svelte';
-	import { ESTStringToUTCTimestamp, UTCTimestampToESTString } from '$lib/core/timestamp';
-	
-	// Track the previously focused element
-	let prevFocusedElement: HTMLElement | null = null;
-	let inputWindowElement: HTMLDivElement;
-	let isLoadingSecurities = false;
-	let manualInputType: string = 'auto';
-
-	// Add this reactive statement
-	$: if (manualInputType !== 'auto' && $inputQuery.status === 'active') {
-		inputQuery.update((v) => ({
-			...v,
-			inputType: manualInputType
-		}));
-	}
-
-	interface ValidateResponse {
-		inputValid: boolean;
-		securities: Instance[];
-	}
-
-	async function validateInput(inputString: string, inputType: string): Promise<ValidateResponse> {
-		if (inputType === 'ticker') {
-			isLoadingSecurities = true;
-			try {
-				const securities = await privateRequest<Instance[]>('getSecuritiesFromTicker', {
-					ticker: inputString
-				});
-				if (Array.isArray(securities) && securities.length > 0) {
-					return {
-						inputValid: true,
-						securities: securities
-					};
-				}
-				return { inputValid: false, securities: [] };
-			} finally {
-				isLoadingSecurities = false;
-			}
-		} else if (inputType === 'timeframe') {
-			const regex = /^\d{1,3}[yqmwhds]?$/i;
-			return { inputValid: regex.test(inputString), securities: [] };
-		} else if (inputType === 'timestamp') {
-			const formats = ['yyyy-MM-dd H:m:ss', 'yyyy-MM-dd H:m', 'yyyy-MM-dd H', 'yyyy-MM-dd'];
-			for (const format of formats) {
-				try {
-					const parsedDate = parse(inputString, format, new Date());
-					if (!isNaN(parsedDate.getTime())) {
-						return { inputValid: true, securities: [] };
-					}
-				} catch {
-					/* try next format */
-				}
-			}
-			return { inputValid: false, securities: [] };
-		} else if (inputType === 'price') {
-			const price = parseFloat(inputString);
-			return { inputValid: !isNaN(price) && price > 0, securities: [] };
-		}
-		return { inputValid: false, securities: [] };
-	}
-
-	async function waitForSecurityResult(): Promise<void> {
-		return new Promise((resolve) => {
-			const check = () => {
-				if (loadedSecurityResultRequest === currentSecurityResultRequest) {
-					resolve();
-				} else {
-					// Check again after 50ms (or adjust as needed)
-					setTimeout(check, 50);
-				}
-			};
-			check();
-		});
-	}
-
-	async function enterInput(iQ: InputQuery, tickerIndex: number = 0): Promise<InputQuery> {
-		if (iQ.inputType === 'ticker') {
-			const ts = iQ.instance.timestamp;
-			await waitForSecurityResult();
-			iQ = $inputQuery;
-			if (Array.isArray(iQ.securities) && iQ.securities.length > 0) {
-				iQ.instance = { ...iQ.instance, ...iQ.securities[tickerIndex] };
-				iQ.instance.timestamp = ts;
-			}
-		} else if (iQ.inputType === 'timeframe') {
-			iQ.instance.timeframe = iQ.inputString;
-		} else if (iQ.inputType === 'timestamp') {
-			iQ.instance.timestamp = ESTStringToUTCTimestamp(iQ.inputString);
-		} else if (iQ.inputType === 'price') {
-			iQ.instance.price = parseFloat(iQ.inputString);
-		}
-		// Mark as complete but then check if further input is needed.
-		iQ.status = 'complete';
-		if (iQ.requiredKeys === 'any') {
-			if (Object.keys(iQ.instance).length === 0) {
-				iQ.status = 'active';
-			}
-		} else {
-			for (const attribute of iQ.requiredKeys) {
-				if (!iQ.instance[attribute]) {
-					iQ.status = 'active';
-					break;
-				}
-			}
-		}
-		iQ.inputString = '';
-		iQ.inputType = '';
-		iQ.inputValid = true;
-		// Reset manualInputType to auto after input is entered
-		manualInputType = 'auto';
-		return iQ;
-	}
-
-	// Handle keyboard input directly on the input window
-	async function handleKeyDown(event: KeyboardEvent): Promise<void> {
-		// Get current state directly from the store to ensure we have latest state
-		const currentState = get(inputQuery);
-
-		// Make sure we're in active state
-		if (currentState.status !== 'active') {
-			return;
-		}
-
-		// Always prevent default behavior for our captured keys to avoid browser handling
-		if (
-			event.key === 'Enter' ||
-			event.key === 'Tab' ||
-			event.key === 'Escape' ||
-			/^[a-zA-Z0-9]$/.test(event.key) ||
-			/[-:.]/.test(event.key) ||
-			(event.key === ' ' && currentState.inputType === 'timestamp') ||
-			event.key === 'Backspace'
-		) {
-			event.preventDefault();
-		}
-
-		// Stop propagation to prevent double-handling
-		event.stopPropagation();
-
-		let iQ = { ...currentState };
-		if (event.key === 'Escape') {
-			inputQuery.update((q) => ({ ...q, status: 'cancelled' }));
-			return;
-		} else if (event.key === 'Enter') {
-			if (iQ.inputValid) {
-				const updatedQuery = await enterInput(iQ, 0);
-				inputQuery.set(updatedQuery);
-			}
-			return;
-		} else if (event.key === 'Tab') {
-			inputQuery.update((q) => ({
-				...q,
-				instance: { ...q.instance, extendedHours: !q.instance.extendedHours }
-			}));
-			return;
-		}
-
-		// Process input keys
-		if (
-			/^[a-zA-Z0-9]$/.test(event.key) ||
-			/[-:.]/.test(event.key) ||
-			(event.key === ' ' && iQ.inputType === 'timestamp')
-		) {
-			// Transform the key based on input type
-			const key = iQ.inputType === 'timeframe' ? event.key : event.key.toUpperCase();
-			const newInputString = iQ.inputString + key;
-
-			// Update inputString immediately
-			inputQuery.update((v) => ({
-				...v,
-				inputString: newInputString
-			}));
-
-			// Then determine input type
-			determineInputType(newInputString);
-		} else if (event.key === 'Backspace') {
-			const newInputString = iQ.inputString.slice(0, -1);
-
-			// Update inputString immediately
-			inputQuery.update((v) => ({
-				...v,
-				inputString: newInputString
-			}));
-
-			// Then determine input type
-			determineInputType(newInputString);
-		}
-	}
-
-	function determineInputType(inputString: string): void {
-		const iQ = get(inputQuery);
-		let inputType = iQ.inputType;
-
-		// Only auto-classify if manualInputType is set to 'auto'
-		if (manualInputType === 'auto') {
-			if (inputString !== '') {
-				if (iQ.possibleKeys.includes('ticker') && /^[A-Z]$/.test(inputString)) {
-					inputType = 'ticker';
-				} else if (iQ.possibleKeys.includes('price') && /^(?:\d*\.\d+|\d{3,})$/.test(inputString)) {
-					inputType = 'price';
-				} else if (
-					iQ.possibleKeys.includes('timeframe') &&
-					/^\d{1,2}[hdwmqs]?$/i.test(inputString)
-				) {
-					inputType = 'timeframe';
-				} else if (iQ.possibleKeys.includes('timestamp') && /^[\d-]+$/.test(inputString)) {
-					inputType = 'timestamp';
-				} else if (iQ.possibleKeys.includes('ticker')) {
-					inputType = 'ticker';
-				} else {
-					inputType = '';
-				}
-			} else {
-				inputType = '';
-			}
-		} else {
-			// Use the manually selected input type
-			inputType = manualInputType;
-		}
-
-		// Update the input type
-		inputQuery.update((v) => ({
-			...v,
-			inputType
-		}));
-
-		// Trigger validation
-		currentSecurityResultRequest++;
-		const thisSecurityResultRequest = currentSecurityResultRequest;
-		validateInput(inputString, inputType).then((validationResp: ValidateResponse) => {
-			if (thisSecurityResultRequest === currentSecurityResultRequest) {
-				inputQuery.update((v: InputQuery) => ({
-					...v,
-					...validationResp
-				}));
-				loadedSecurityResultRequest = thisSecurityResultRequest;
-			}
-		});
-	}
-
-	// Handle clicks outside the popup to close it
-	function handleOutsideClick(event: MouseEvent) {
-		const inputWindow = document.getElementById('input-window');
-		if (!inputWindow || !inputWindow.contains(event.target as Node)) {
-			inputQuery.update((v) => ({ ...v, status: 'cancelled' }));
-		}
-	}
-
-	function closeWindow() {
-		inputQuery.update((v) => ({ ...v, status: 'cancelled' }));
-	}
-
-	let sectors: string[] = [];
-	let industries: string[] = [];
-	function capitalize(str: string, lower = false): string {
-		return (lower ? str.toLowerCase() : str).replace(/(?:^|\s|["'([{])+\S/g, (match: string) =>
-			match.toUpperCase()
-		);
-	}
-
-	function formatTimeframe(timeframe: string): string {
-		const match = timeframe.match(/^(\d+)([dwmsh]?)$/i) ?? null;
-		let result = timeframe;
-		if (match) {
-			switch (match[2]) {
-				case 'd':
-					result = `${match[1]} days`;
-					break;
-				case 'w':
-					result = `${match[1]} weeks`;
-					break;
-				case 'm':
-					result = `${match[1]} months`;
-					break;
-				case 'h':
-					result = `${match[1]} hours`;
-					break;
-				case 's':
-					result = `${match[1]} seconds`;
-					break;
-				default:
-					result = `${match[1]} minutes`;
-					break;
-			}
-			if (match[1] === '1') {
-				result = result.slice(0, -1);
-			}
-		}
-		return result;
-	}
-
-	onMount(() => {
-		// Store the currently focused element
-		prevFocusedElement = document.activeElement as HTMLElement;
-
-		const unsubscribe = inputQuery.subscribe((v: InputQuery) => {
-			if (browser) {
-				if (v.status === 'initializing') {
-					// Store focused element before showing the popup
-					prevFocusedElement = document.activeElement as HTMLElement;
-                    
-                    // Mark the UI as active now
-                    inputQuery.update((state) => ({ ...state, status: 'active' }));
-                    
-                    // Focus the input window after it renders
-                    tick().then(() => {
-                        // Focus the input window itself (will receive keyboard events)
-                        if (inputWindowElement) {
-                            inputWindowElement.focus();
-                        }
-                        
-                        // Add a click handler to the document to detect clicks outside the popup
-                        document.addEventListener('mousedown', handleOutsideClick);
-                    });
-				} else if (v.status === 'shutdown' || v.status === 'cancelled') {
-					// Remove document click handler
-					document.removeEventListener('mousedown', handleOutsideClick);
-					
-					// Restore focus to the previously focused element
-					if (prevFocusedElement) {
-                        tick().then(() => {
-                            prevFocusedElement?.focus();
-                            
-                            if (v.status === 'shutdown') {
-                                // Reset to inactive only after focus is restored
-                                inputQuery.update((state) => ({ ...state, status: 'inactive', inputString: '' }));
-                            }
-                        });
-					} else if (v.status === 'shutdown') {
-                        // Reset to inactive if there was no previous element
-                        inputQuery.update((state) => ({ ...state, status: 'inactive', inputString: '' }));
-                    }
-				}
-			}
-		});
-
-		type SecurityClassifications = {
-			sectors: string[];
-			industries: string[];
-		};
-		privateRequest<SecurityClassifications>('getSecurityClassifications', {}, false).then(
-			(classifications: SecurityClassifications) => {
-				sectors = classifications.sectors;
-				industries = classifications.industries;
-			}
-		);
-		
-		return () => {
-			unsubscribe();
-		};
-	});
-
-	onDestroy(() => {
-		// Clean up any remaining event listeners
-		document.removeEventListener('mousedown', handleOutsideClick);
-	});
-	
-	function displayValue(q: InputQuery, key: string): string {
-		if (key === q.inputType) {
-			return q.inputString;
-		} else if (key in q.instance) {
-			if (key === 'timestamp') {
-				return UTCTimestampToESTString(q.instance.timestamp ?? 0);
-			} else if (key === 'extendedHours') {
-				return q.instance.extendedHours ? 'True' : 'False';
-			} else if (key === 'price') {
-				return '$' + String(q.instance.price);
-			} else {
-				return String(q.instance[key as keyof Instance]);
-			}
-		}
-		return '';
-	}
-</script>
-
-{#if $inputQuery.status === 'active' || $inputQuery.status === 'initializing'}
-	<div
-		class="popup-container"
-		id="input-window"
-		bind:this={inputWindowElement}
-		tabindex="0"
-		on:keydown={handleKeyDown}
-	>
-		<div class="header">
-			<div class="title">{capitalize($inputQuery.inputType)} Input</div>
-			<div class="field-select">
-				<span class="label">Field:</span>
-				<select
-					class="default-select"
-					bind:value={manualInputType}
-					on:click|stopPropagation
-					on:change|stopPropagation
-				>
-					<option value="auto">Auto</option>
-					{#each $inputQuery.possibleKeys as key}
-						<option value={key}>{capitalize(key)}</option>
-					{/each}
-				</select>
-			</div>
-			<button class="utility-button" on:click|stopPropagation={closeWindow}>×</button>
-		</div>
-
-		<div class="search-bar">
-			<input type="text" placeholder="Enter Value" value={$inputQuery.inputString} readonly />
-		</div>
-		<div class="content-container">
-			{#if $inputQuery.instance && Object.keys($inputQuery.instance).length > 0}
-				{#if $inputQuery.inputType === ''}
-					<div class="span-container">
-						{#each $inputQuery.possibleKeys as key}
-							<div class="span-row">
-								<span
-									class={$inputQuery.requiredKeys !== 'any' &&
-									$inputQuery.requiredKeys.includes(key) &&
-									!$inputQuery.instance[key]
-										? 'red'
-										: ''}
-								>
-									{capitalize(key)}
-								</span>
-								<span class="value">
-									{displayValue($inputQuery, key)}
-								</span>
-							</div>
-						{/each}
-					</div>
-				{:else if $inputQuery.inputType === 'ticker'}
-					<div class="table-container">
-						{#if isLoadingSecurities}
-							<div class="loading-container">
-								<div class="loading-spinner"></div>
-								<span class="label">Loading securities...</span>
-							</div>
-						{:else if Array.isArray($inputQuery.securities) && $inputQuery.securities.length > 0}
-							<table>
-								<tbody>
-									{#each $inputQuery.securities as sec, i}
-										<tr
-											on:click={async () => {
-												const updatedQuery = await enterInput($inputQuery, i);
-												inputQuery.set(updatedQuery);
-											}}
-										>
-											<td class="defalt-td">
-												<div
-													style="background-color: transparent; width: 100px; height: 30px; display: flex; align-items: center; justify-content: center;"
-												>
-													{#if sec.icon}
-														<img
-															src={`data:image/jpeg;base64,${sec.icon}`}
-															alt="Security Image"
-															style="max-width: 100%; max-height: 100%; object-fit: contain;"
-														/>
-													{/if}
-												</div>
-											</td>
-											<td class="defalt-td">{sec.ticker}</td>
-											<td class="defalt-td">{sec.name}</td>
-											<td class="defalt-td"
-												>{sec.timestamp !== undefined
-													? UTCTimestampToESTString(sec.timestamp)
-													: ''}</td
-											>
-										</tr>
-									{/each}
-								</tbody>
-							</table>
-						{/if}
-					</div>
-				{:else if $inputQuery.inputType === 'timestamp'}
-					<div class="span-container">
-						<div class="span-row">
-							<span class="label">Timestamp</span>
-							<input
-								type="datetime-local"
-								on:change={(e) => {
-									// Use type casting in a different way that works better with Svelte compiler
-									const target = e.target;
-									const inputValue = target && 'value' in target ? String(target.value) : '';
-									const date = new Date(inputValue);
-									inputQuery.update((q) => ({
-										...q,
-										instance: {
-											...q.instance,
-											timestamp: !isNaN(date.getTime()) ? date.getTime() : q.instance.timestamp
-										},
-										inputValid: !isNaN(date.getTime())
-									}));
-								}}
-							/>
-						</div>
-					</div>
-				{:else if $inputQuery.inputType === 'timeframe'}
-					<div class="span-container">
-						<div class="span-row">
-							<span class="label">Timeframe</span>
-							<span class="value">{formatTimeframe($inputQuery.inputString)}</span>
-						</div>
-					</div>
-				{:else if $inputQuery.inputType === 'extendedHours'}
-					<div class="span-container">
-						<div class="span-row">
-							<span class="label">Extended Hours</span>
-							<span class="value">{$inputQuery.instance.extendedHours ? 'True' : 'False'}</span>
-						</div>
-					</div>
-					0
-				{/if}
-			{/if}
-		</div>
-	</div>
-{/if}
-
-<style>
-	.popup-container {
-		width: 700px;
-		height: 600px;
-		background: var(--ui-bg-primary);
-		border: 1px solid var(--ui-border);
-		border-radius: 8px;
-		display: flex;
-		flex-direction: column;
-		overflow: hidden;
-		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
-		position: fixed;
-		top: 50%;
-		left: 50%;
-		transform: translate(-50%, -50%);
-		z-index: 9999;
-	}
-	.span-container {
-		display: felx;
-		flex-direction: column;
-		gap: 8px;
-		width: 100%;
-	}
-	.span-container span {
-		align-items: top;
-		display: block;
-		flex-direction: row;
-		width: 100%;
-		font-size: 30px;
-	}
-	.span-row {
-		/* Each row is a flex container, left label and right value */
-		display: flex;
-		flex-direction: row;
-		justify-content: space-between;
-		/* optionally align items on the baseline or center */
-		align-items: baseline;
-	}
-
-	.span-row span {
-		/* Let it inherit the global font instead of forcing a size */
-		font-size: inherit;
-	}
-
-	.header {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		padding: 8px 12px;
-		border-bottom: 1px solid var(--ui-border);
-		height: 40px;
-	}
-
-	.title {
-		font-size: 16px;
-		font-weight: 500;
-		color: var(--text-primary);
-	}
-
-	.search-bar {
-		padding: 8px 12px;
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		border-bottom: 1px solid var(--ui-border);
-		height: 48px;
-		position: relative;
-	}
-
-	.search-bar input {
-		flex: 1;
-		background: var(--ui-bg-element);
-		border: 1px solid var(--ui-border);
-		padding: 6px 10px;
-		color: var(--text-primary);
-		border-radius: 4px;
-	}
-
-	.search-icon {
-		color: var(--text-secondary);
-	}
-
-	.filters {
-		padding: 4px 8px;
-		display: flex;
-		gap: 4px;
-		flex-wrap: wrap;
-		border-bottom: 1px solid var(--ui-border);
-		height: auto;
-		max-height: 80px;
-		overflow-y: auto;
-	}
-
-	.filter-bubble {
-		background: transparent;
-		border: 1px solid var(--ui-border);
-		color: var(--text-secondary);
-		padding: 2px 8px;
-		border-radius: 8px;
-		font-size: 10px;
-		cursor: pointer;
-		transition: all 0.2s;
-	}
-
-	.filter-bubble.active {
-		background: var(--ui-accent);
-		border-color: var(--ui-accent);
-		color: var(--text-primary);
-	}
-
-	.content-container {
-		flex: 1;
-		overflow-y: auto;
-		padding: 12px;
-	}
-
-	.field-select {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		margin-left: auto;
-	}
-
-	.field-select span {
-		color: var(--text-secondary);
-		font-size: 14px;
-	}
-	
-	.loading-spinner {
-		width: 30px;
-		height: 30px;
-		border: 3px solid var(--ui-border);
-		border-top: 3px solid var(--text-primary);
-		border-radius: 50%;
-		animation: spin 1s linear infinite;
-		margin-bottom: 10px;
-	}
-	.security-item {
-		display: flex;
-		align-items: center;
-		padding: 8px 12px;
-		cursor: pointer;
-		border-bottom: 1px solid var(--ui-border);
-		height: 40px;
-	}
-
-	.security-item:hover {
-		background: var(--ui-bg-hover);
-	}
-
-	.security-icon {
-		margin-right: 12px;
-		width: 24px;
-		height: 24px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-	}
-
-	.security-icon img {
-		width: 28px;
-		height: 28px;
-		object-fit: contain;
-	}
-
-	.security-info {
-		flex: 1;
-		display: flex;
-		flex-direction: row;
-		align-items: center;
-		gap: 12px;
-	}
-
-	.security-main {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		flex: 1;
-	}
-
-	.ticker {
-		font-weight: 600;
-		color: var(--text-primary);
-		min-width: 60px;
-		font-size: 0.9em;
-	}
-
-	.name {
-		color: var(--text-secondary);
-		font-size: 0.85em;
-		flex: 1;
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-
-	.security-details {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		flex: 1;
-		color: var(--text-secondary);
-		font-size: 0.8em;
-		margin-left: auto;
-	}
-
-	.sector {
-		color: var(--text-secondary);
-		font-size: 0.8em;
-		margin-right: 8px;
-	}
-
-	.exchange {
-		color: var(--text-secondary);
-		font-size: 0.8em;
-		min-width: 50px;
-	}
-
-	.date {
-		color: var(--text-secondary);
-		align-items: center;
-		justify-content: center;
-		padding: 20px;
-	}
-</style>
-
-
-<file>../broker/services/frontend/src/routes/app/chart.svelte</file>
-<!-- chart.svelte -->
-<script>
-	import { onMount } from "svelte";
-	import { chart } from "../../chart/chart.js";
-	import {toDT, chartQuery, setups_list,menuLeftPos,  request , currentEntry} from "../../store.js";
-	let innerWidth, canvas, innerHeight, Chart, queryLabel,  selectedT, selectedPrice, selectedMenuAction, clickX, clickY;
-    let chartMenuVisible = false;
-    let chartFocused = true;
-	let queryError = "";
-    let queryValue = "";
-    import { get } from 'svelte/store';
-
-    function handleChartClick(event) {
-        chartFocused = true;
-        chartMenuVisible = false;
-        selectedMenuAction = null;
-    }
-    function updateChartSize(v) {
-        if (!canvas) {
-            return;
-        }
-        canvas.width = v;
-        canvas.height = window.innerHeight;
-        Chart.draw();
-    }
-    function handleWindowClick(event) {
-        if (!canvas.contains(event.target)) {
-            chartMenuVisible = false;
-            chartFocused = false;
-            queryValue = "";
-            queryLabel = null;
-            queryError = "";
-        }
-    }
-    function handleRightClick(event) {
-        if (!Chart.queryValid) return;
-        clickX = event.clientX - canvas.getBoundingClientRect().left;
-        clickY = event.clientY - canvas.getBoundingClientRect().top;
-        chartMenuVisible = true;
-        selectedT = Chart.currentT;
-        selectedPrice = Chart.currentPrice;
-    }
-
-	onMount(() => {
-		Chart = new chart(canvas, {
-            margin: 20,
-            defaultCandleWidth: 10,
-        });
-        menuLeftPos.subscribe((v) => updateChartSize(v));
-        chartQuery.subscribe((v) => {Chart.updateQuery(v[0],v[1],v[2],v[3]);});
-        window.addEventListener("resize", updateChartSize);
-        window.addEventListener("click", handleWindowClick);
-        canvas.addEventListener("contextmenu", (event) => {event.preventDefault();handleRightClick(event);});
-        canvas.addEventListener("click", handleChartClick);
-        chartQuery.set(["MSTR","1d",null,false])
-        return () => {
-            window.removeEventListener("click", handleWindowClick);
-            window.removeEventListener("resize", updateChartSize);
-            canvas.removeEventListener("click", handleChartClick);
-        };
-    });
-
-    function classifyInput(input){
-        if (queryValue) {
-        return /^[0-9]$/.test(input[0]) ? "Interval" : "Ticker";
-        }else{
-            return null;
-        }
-    }
-
-
-
-	function onKeydown(event) {
-        if (!chartFocused) return;
-        chartMenuVisible = false;
-		if (/^[a-zA-Z0-9]$/.test(event.key.toLowerCase())) {
-            console.log(queryValue);
-            queryError = ""
-			queryValue += event.key;
-            queryLabel = classifyInput(queryValue);
-		}else if (event.key == "Backspace") {
-            queryValue = queryValue.slice(0, -1);
-            queryLabel = classifyInput(queryValue);
-        }else if (event.key == "Escape") {
-            queryValue = "";
-            queryLabel = null;
-            queryError = "";
-        }
-        else if (event.key == "Enter") {
-            switch (queryLabel) {
-                case "Ticker":
-                    chartQuery.update((v) => {return ([queryValue.toUpperCase(),v[1],v[2],v[3]])});
-                    break;
-                case "Interval":
-                    chartQuery.update((v) => {return ([v[0],queryValue,v[2],v[3]])});
-                    break;
-                case "Date":
-                    break;
-                case null:
-                    queryError = "Invalid Input";
-                    break;
-            }
-			queryValue = "";
-		}
-	}
-</script>
-
-
-<canvas bind:this={canvas} class="chart-container"></canvas>
-<svelte:window on:keydown={onKeydown} bind:innerWidth bind:innerHeight />
-
-{#if chartMenuVisible}
-    <div class="menu" style="top: {clickY}px; left: {clickX}px;">
-        <p>Add {`${Chart.ticker} ${toDT(selectedT)}`} to ...</p>
-        <button on:click={() => {selectedMenuAction = "newAnnotation"; chartMenuVisible = false}}>Annotate</button>
-        <button on:click={() => {currentEntry.update((e) => `${e} [${Chart.ticker}|${Chart.i}|${selectedT}|${Chart.pm}] `)}}>Entry</button>
-    </div>
-{/if}
-{#if selectedMenuAction}
-    <div class="menu" style="top: {clickY}px; left: {clickX}px;">
-        {#each $setups_list as setup}
-            <button on:click={() => {request(null,true,selectedMenuAction,Chart.ticker,setup[0],selectedT); selectedMenuAction = null; chartMenuVisible = false}}>{setup[1]}</button>
-        {/each}
-    </div>
-{/if}
-
-{#if queryValue}
-    <div class="query">
-        <div class="value">{queryValue}</div>
-        <div class="label">{queryLabel}</div>
-    </div>
-{/if}
-{#if queryError}
-    <div class="queryError">
-        {queryError}
-    </div>
-{/if}
-
-<style>
-    @import "../../global.css";
-    .chart-container {
-        background-color: black;
-        width: 100%;
-        height: 100%;
-        /*flex-grow: 1;*/
-
-    }
-	.menu {
-        position: absolute;
-        color: white; 
-        background-color: var(--c2); 
-        padding: 10px; 
-        border-radius: 5px; 
-        text-align: left; 
-        box-sizing: border-box;
-        z-index: 1000;
-        font-size: 16px; 
-        box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2); 
-        font-family: Arial, sans-serif; 
-        border: 2px solid var(--c3); 
-    }
-
-    .menu button {
-        display: block; 
-        margin: 5px 0; 
-        background-color: var(--c1); 
-        color: var(--f1); 
-        border: none;
-        border-radius: 4px;
-        padding: 10px 20px;
-        text-align: left; 
-        width: 100%; 
-        box-sizing: border-box; 
-        transition: background-color 0.3s; 
-        cursor: pointer; 
-    }
-
-    .menu button:hover {
-        background-color: #505760; 
-    }
-
-    .query {
-        position: absolute;
-        top: 50%;
-        left: 50%;
-        transform: translate(-50%, -50%);
-        background-color: var(--c2); 
-        border: 2px solid var(--c3);
-        padding: 10px;
-        border-radius: 5px;
-        text-align: center;
-        box-sizing: border-box;
-        z-index: 2000;
-        font-size: 16px; 
-        color: var(--f1);
-        font-family: Arial, sans-serif; 
-        text-transform: uppercase; 
-    }
-    .value {
-        font-size: 16pt; 
-    }
-    .label {
-        margin-top: 10px; 
-        font-size: 14pt; 
-    }
-    .queryError {
-        position: fixed;
-        top: 50%;
-        left: 50%;
-        transform: translate(-50%, -50%);
-        z-index: 10000;
-        color: var(--c4);
-        background-color: #FFD2D2;
-        padding: 20px 40px;
-        border-radius: 10px;
-        border: 2px solid #D8000C;
-        box-shadow: 0px 0px 20px rgba(0, 0, 0, 0.7);
-        font-size: 20px;
-        font-weight: bold;
-        text-align: center;
-        max-width: 600px;
-        word-wrap: break-word;
-        box-sizing: border-box;
-    }
-</style>
-
-
-<file>../study/frontend/src/lib/features/chart/chartContainer.svelte</file>
-<script lang="ts">
-	import Chart from './chart.svelte';
-	import { settings } from '$lib/core/stores';
-	import { onMount, tick } from 'svelte';
-	import { get } from 'svelte/store';
-	import { queryInstanceInput } from '$lib/utils/popups/input.svelte';
-	import { queryChart } from './interface';
-	export let width: number;
-
-	// Add focus management
-	let containerRef: HTMLDivElement;
-
-	onMount(() => {
-		// Focus the chart container immediately after it's mounted
-		if (containerRef) {
-			containerRef.focus();
-		}
-
-		// Add global keyboard event listener for chart container
-		const handleGlobalKeydown = (event: KeyboardEvent) => {
-			// If an input popup is active, don't process keyboard input here
-			const inputWindow = document.getElementById('input-window');
-			if (inputWindow) {
-				return;
-			}
-
-			// Only handle alphanumeric keys when no modal is active and no modifier keys are pressed
-			if (
-				/^[a-zA-Z0-9]$/.test(event.key) &&
-				!event.ctrlKey &&
-				!event.metaKey &&
-				!event.altKey &&
-				document.activeElement !== document.body // Don't interfere with other focused elements
-			) {
-				// Create an initial instance with the first key as the inputString
-				const initialKey = event.key.toUpperCase();
-
-				// Use type assertion to allow the inputString property
-				const instanceWithInput = {
-					inputString: initialKey
-				} as any;
-
-				queryInstanceInput(
-					'any',
-					['ticker', 'timeframe', 'timestamp', 'extendedHours'],
-					instanceWithInput
-				).then((updatedInstance) => {
-					queryChart(updatedInstance, true);
-					// Focus will be automatically restored to the chart by the input component
-				});
-			}
-		};
-
-		document.addEventListener('keydown', handleGlobalKeydown);
-
-		return () => {
-			document.removeEventListener('keydown', handleGlobalKeydown);
-		};
-	});
-
-	// Handle focus management
-	function handleKeyDown(event: KeyboardEvent) {
-		if (event.key === 'Tab') {
-			event.preventDefault(); // Prevent default tab behavior
-		}
-	}
-</script>
-
-<div
-	class="chart-container"
-	bind:this={containerRef}
-	tabindex="0"
-	role="application"
-	aria-label="Chart Container"
-	on:keydown={handleKeyDown}
->
-	{#each Array.from({ length: $settings.chartRows }) as _, j}
-		<div class="row" style="height: calc(100% / {$settings.chartRows})">
-			{#each Array.from({ length: $settings.chartColumns }) as _, i}
-				<Chart width={width / $settings.chartColumns} chartId={i + j * $settings.chartColumns} />
-			{/each}
-		</div>
-	{/each}
-</div>
-
-<style>
-	.chart-container {
-		display: flex;
-		flex-direction: column;
-		width: 100%;
-		height: 100%;
-		position: absolute;
-		top: 0;
-		left: 0;
-		right: 0;
-		bottom: 0;
-		outline: none; /* Remove focus outline but maintain accessibility */
-	}
-
-	.row {
-		display: flex;
-		width: 100%;
-		justify-content: space-between;
-		flex: 1;
-		min-height: 0;
-	}
-</style>
-
-
-<file>../study/frontend/src/lib/features/watchlist.svelte</file>
-<script lang="ts">
 	import List from '$lib/utils/modules/list.svelte';
-	import type { Writable } from 'svelte/store';
-	import { writable, get } from 'svelte/store';
-	import type { Instance, Watchlist } from '$lib/core/types';
-	import { onMount, tick } from 'svelte';
-	import { privateRequest } from '$lib/core/backend';
-	import { queryInstanceInput } from '$lib/utils/popups/input.svelte';
-	import { flagWatchlistId, watchlists, flagWatchlist } from '$lib/core/stores';
-	import '$lib/core/global.css';
+	import { writable } from 'svelte/store';
+	import { UTCTimestampToESTString } from '$lib/core/timestamp';
+	import { onMount } from 'svelte';
 
-	let activeList: Writable<Instance[]> = writable([]);
-	let newWatchlistName = '';
-	let currentWatchlistId: number;
-	let container: HTMLDivElement;
-	let newNameInput: HTMLInputElement;
-	let showWatchlistInput = false;
-	let confirmingDelete = false;
+	// Add tab state
+	let activeTab = 'trades';
 
-	onMount(() => {
-		selectWatchlist(flagWatchlistId);
-	});
+	let files: FileList;
+	let uploading = false;
+	let message = '';
+	let trades = writable<Trade[]>([]);
 
-	function addInstance() {
-		const inst = { ticker: '', timestamp: 0 };
-		queryInstanceInput(['ticker'], ['ticker', 'timestamp'], inst).then((i: Instance) => {
-			const aList = get(activeList);
-			const empty = !Array.isArray(aList);
-			if (empty || !aList.find((l: Instance) => l.ticker === i.ticker)) {
-				privateRequest<number>('newWatchlistItem', {
-					watchlistId: parseInt(currentWatchlistId, 10),
-					securityId: i.securityId
-				}).then((watchlistItemId: number) => {
-					activeList.update((v: Instance[]) => {
-						i.watchlistItemId = watchlistItemId;
-						if (empty) {
-							return [i];
-						} else {
-							return [...v, i];
-						}
-					});
-				});
-			}
-			setTimeout(() => {
-				addInstance();
-			}, 1);
-		});
+	let tickerStats = writable<TickerStats[]>([]);
+	// Add filter states
+	let sortDirection = 'desc';
+	let selectedDate = '';
+	let selectedHour: number | '' = '';
+	let selectedTicker = '';
+
+	// Add statistics state
+	let statistics = writable<{
+		total_trades: number;
+		winning_trades: number;
+		losing_trades: number;
+		win_rate: number;
+		avg_win: number;
+		avg_loss: number;
+		total_pnl: number;
+		top_trades: Trade[];
+		bottom_trades: Trade[];
+		hourly_stats: {
+			hour: number;
+			hour_display: string;
+			total_trades: number;
+			winning_trades: number;
+			losing_trades: number;
+			win_rate: number;
+			avg_pnl: number;
+			total_pnl: number;
+		}[];
+		ticker_stats: {
+			ticker: string;
+			total_trades: number;
+			winning_trades: number;
+			losing_trades: number;
+			win_rate: number;
+			avg_pnl: number;
+			total_pnl: number;
+		}[];
+	} | null>(null);
+
+	// Add statistics filters
+	let statStartDate = '';
+	let statEndDate = '';
+	let statTicker = '';
+
+	// Add this in the script section at the top
+	let deletingTrades = false;
+
+	interface Trade extends Instance {
+		trade_direction: string;
+		status: string;
+		openQuantity: number;
+		closedPnL: number | null;
+	}
+	interface TickerStats extends Instance {
+		ticker: string;
+		total_trades: number;
+		winning_trades: number;
+		losing_trades: number;
+		win_rate: number;
+		avg_pnl: number;
+		total_pnl: number;
 	}
 
-	function newWatchlist() {
-		if (newWatchlistName === '') return;
-
-		// Check for duplicate names
-		const existingWatchlist = get(watchlists).find(
-			(w) => w.watchlistName.toLowerCase() === newWatchlistName.toLowerCase()
-		);
-
-		if (existingWatchlist) {
-			alert('A watchlist with this name already exists');
+	async function handleFileUpload() {
+		if (!files || !files[0]) {
+			message = 'Please select a file first';
 			return;
 		}
 
-		privateRequest<number>('newWatchlist', { watchlistName: newWatchlistName }).then(
-			(newId: number) => {
-				watchlists.update((v: Watchlist[]) => {
-					const w: Watchlist = {
-						watchlistName: newWatchlistName,
-						watchlistId: newId
-					};
-					selectWatchlist(String(newId));
-					newWatchlistName = '';
-					showWatchlistInput = false;
-					if (!Array.isArray(v)) {
-						return [w];
-					}
-					return [w, ...v];
-				});
-			}
-		);
+		uploading = true;
+		message = 'Uploading...';
+
+		try {
+			const result = await privateFileRequest<{ trades: Trade[] }>('handle_trade_upload', files[0]);
+			trades.set(result.trades);
+			message = 'Upload successful!';
+		} catch (error) {
+			message = `Error: ${error}`;
+			console.error('Upload error:', error);
+		} finally {
+			uploading = false;
+		}
 	}
 
-	function deleteItem(item: Instance) {
-		if (!item.watchlistItemId) {
-			throw new Error('missing id on delete');
-		}
-		privateRequest<void>('deleteWatchlistItem', { watchlistItemId: item.watchlistItemId }).then(
-			() => {
-				activeList.update((items) => {
-					return items.filter((i) => i.watchlistItemId !== item.watchlistItemId);
-				});
+	async function pullTrades() {
+		try {
+			const params: any = { sort: sortDirection };
+
+			if (selectedDate) {
+				params.date = selectedDate;
 			}
-		);
+
+			if (selectedHour !== '') {
+				params.hour = selectedHour;
+			}
+
+			if (selectedTicker) {
+				params.ticker = selectedTicker.toUpperCase();
+			}
+
+			const result = await queueRequest<Trade[]>('grab_user_trades', params);
+			trades.set(result);
+			message = 'Trades loaded successfully';
+		} catch (error) {
+			message = `Error: ${error}`;
+			console.error('Load trades error:', error);
+		}
 	}
 
-	function selectWatchlist(watchlistIdString: string) {
-		if (!watchlistIdString) return;
+	async function fetchStatistics() {
+		try {
+			const params: any = {};
 
-		if (watchlistIdString === 'new') {
-			showWatchlistInput = true;
-			tick().then(() => {
-				newNameInput.focus();
-			});
-			return;
+			if (statStartDate) params.start_date = statStartDate;
+			if (statEndDate) params.end_date = statEndDate;
+			if (statTicker) params.ticker = statTicker.toUpperCase();
+
+			const result = await queueRequest('get_trade_statistics', params);
+			statistics.set(result);
+			message = 'Statistics loaded successfully';
+		} catch (error) {
+			message = `Error: ${error}`;
+			console.error('Load statistics error:', error);
 		}
+	}
 
-		if (watchlistIdString === 'delete') {
-			if (confirmingDelete) {
-				deleteWatchlist(currentWatchlistId);
-				confirmingDelete = false;
-			} else {
-				confirmingDelete = true;
-				const watchlist = get(watchlists).find((w) => w.watchlistId === currentWatchlistId);
-				if (!confirm(`Are you sure you want to delete "${watchlist?.watchlistName}"?`)) {
-					selectWatchlist(String(currentWatchlistId));
-					return;
+	// Add pullTickers function
+	async function pullTickers() {
+		try {
+			const params: any = { sort: sortDirection };
+
+			if (selectedDate) {
+				params.date = selectedDate;
+			}
+
+			if (selectedHour !== '') {
+				params.hour = selectedHour;
+			}
+
+			if (selectedTicker) {
+				params.ticker = selectedTicker.toUpperCase();
+			}
+
+			const result = await queueRequest('get_ticker_performance', params);
+			tickerStats.set(result);
+			message = 'Ticker stats loaded successfully';
+		} catch (error) {
+			message = `Error: ${error}`;
+			console.error('Load ticker stats error:', error);
+		}
+	}
+
+	// Generate hours array for the select dropdown
+	const hours = Array.from({ length: 24 }, (_, i) => ({
+		value: i,
+		label: `${i.toString().padStart(2, '0')}:00`
+	}));
+
+	async function confirmDeleteAllTrades() {
+		if (
+			confirm('Are you sure you want to delete ALL of your trades? This action cannot be undone.')
+		) {
+			try {
+				deletingTrades = true;
+				message = 'Deleting all trades...';
+
+				const result = await queueRequest('delete_all_user_trades', {});
+
+				if (result.status === 'success') {
+					message = result.message;
+					// Refresh the trades list
+					trades.set([]);
+				} else {
+					message = `Error: ${result.message}`;
 				}
-				deleteWatchlist(currentWatchlistId);
+			} catch (error) {
+				message = `Error: ${error}`;
+				console.error('Delete trades error:', error);
+			} finally {
+				deletingTrades = false;
 			}
-			return;
 		}
-
-		showWatchlistInput = false;
-		const watchlistId = parseInt(watchlistIdString);
-		if (watchlistId === flagWatchlistId) {
-			activeList = flagWatchlist;
-		} else {
-			activeList = writable<Instance[]>([]);
-		}
-		currentWatchlistId = watchlistId;
-		privateRequest<Instance[]>('getWatchlistItems', { watchlistId: watchlistId }).then(
-			(v: Instance[]) => {
-				activeList.set(v);
-			}
-		);
-	}
-
-	function deleteWatchlist(id: number) {
-		privateRequest<void>('deleteWatchlist', { watchlistId: id }).then(() => {
-			watchlists.update((v: Watchlist[]) => {
-				return v.filter((v: Watchlist) => v.watchlistId !== id);
-			});
-			if (id === flagWatchlistId) {
-				flagWatchlist.set([]);
-			}
-		});
-	}
-
-	// Helper function to get first letter of watchlist name
-	function getWatchlistInitial(name: string): string {
-		return name.charAt(0).toUpperCase();
-	}
-
-	function handleWatchlistChange(event: Event) {
-		const target = event.target as HTMLSelectElement;
-		selectWatchlist(target.value);
 	}
 </script>
 
-<div tabindex="-1" class="feature-container" bind:this={container}>
-	<!-- Controls container first -->
-	<div class="controls-container">
-		{#if Array.isArray($watchlists)}
-			<div class="watchlist-selector">
-				<select
-					class="default-select"
-					id="watchlists"
-					bind:value={currentWatchlistId}
-					on:change={handleWatchlistChange}
-				>
-					<optgroup label="My Watchlists">
-						{#each $watchlists as watchlist}
-							<option value={watchlist.watchlistId}>
-								{watchlist.watchlistName}
-							</option>
-						{/each}
-					</optgroup>
-					<optgroup label="Actions">
-						<option value="new">+ Create New Watchlist</option>
-						{#if currentWatchlistId}
-							<option value="delete">- Delete Current Watchlist</option>
-						{/if}
-					</optgroup>
-				</select>
-				{#if !showWatchlistInput}
-					<button class="utility-button" title="Add Symbol" on:click={addInstance}>+</button>
-				{/if}
+<div class="account-container">
+	<!-- Tab Navigation -->
+	<div class="tab-navigation">
+		<button class:active={activeTab === 'trades'} on:click={() => (activeTab = 'trades')}>
+			Trades
+		</button>
+		<button class:active={activeTab === 'tickers'} on:click={() => (activeTab = 'tickers')}>
+			Tickers
+		</button>
+		<button class:active={activeTab === 'statistics'} on:click={() => (activeTab = 'statistics')}>
+			Statistics
+		</button>
+		<button class:active={activeTab === 'other'} on:click={() => (activeTab = 'other')}>
+			Other
+		</button>
+	</div>
+
+	<!-- Trades Tab -->
+	{#if activeTab === 'trades'}
+		<div class="tab-content">
+			<h2>Trade History Upload</h2>
+			<div class="upload-section">
+				<input type="file" accept=".csv" bind:files disabled={uploading} />
+				<button on:click={handleFileUpload} disabled={uploading || !files}> Upload </button>
 			</div>
 
-			{#if showWatchlistInput}
-				<div class="new-watchlist-container">
+			<div class="filters-section">
+				<input
+					type="text"
+					placeholder="Ticker"
+					bind:value={selectedTicker}
+					on:change={pullTrades}
+				/>
+				<select class="default-select" bind:value={sortDirection} on:change={pullTrades}>
+					<option value="desc">Newest First</option>
+					<option value="asc">Oldest First</option>
+				</select>
+
+				<input type="date" bind:value={selectedDate} on:change={pullTrades} />
+
+				<select class="default-select" bind:value={selectedHour} on:change={pullTrades}>
+					<option value="">All Hours</option>
+					{#each hours as hour}
+						<option value={hour.value}>{hour.label}</option>
+					{/each}
+				</select>
+
+				<button class="action-button" on:click={pullTrades}>Load Trades</button>
+
+				<button class="delete-button" on:click={confirmDeleteAllTrades} disabled={deletingTrades}>
+					{deletingTrades ? 'Deleting...' : 'Delete All Trades'}
+				</button>
+			</div>
+
+			{#if message}
+				<p class="message">{message}</p>
+			{/if}
+
+			<List
+				on:contextmenu={(event) => {
+					event.preventDefault();
+				}}
+				list={trades}
+				columns={['timestamp', 'Ticker', 'trade_direction', 'status', 'openQuantity', 'closedPnL']}
+				displayNames={{
+					timestamp: 'Time',
+					Ticker: 'Ticker',
+					trade_direction: 'Direction',
+					status: 'Status',
+					openQuantity: 'Quantity',
+					closedPnL: 'P/L'
+				}}
+				formatters={{
+					timestamp: (value) => (value ? UTCTimestampToESTString(value) : 'N/A'),
+					closedPnL: (value) => (value !== null ? `$${value.toFixed(2)}` : 'N/A')
+				}}
+				expandable={true}
+				expandedContent={(trade) => ({
+					trades: trade.trades.map((t) => ({
+						time: UTCTimestampToESTString(t.time),
+						type: t.type,
+						price: `$${t.price.toFixed(2)}`,
+						shares: t.shares
+					})),
+					tradeId: trade.tradeId
+				})}
+			/>
+		</div>
+	{/if}
+
+	<!-- Tickers Tab -->
+	{#if activeTab === 'tickers'}
+		<div class="tab-content">
+			<h2>Ticker Performance</h2>
+
+			<div class="filters-section">
+				<input
+					type="text"
+					placeholder="Ticker"
+					bind:value={selectedTicker}
+					on:change={pullTickers}
+				/>
+				<select class="default-select" bind:value={sortDirection} on:change={pullTickers}>
+					<option value="desc">Newest First</option>
+					<option value="asc">Oldest First</option>
+				</select>
+
+				<input type="date" bind:value={selectedDate} on:change={pullTickers} />
+
+				<select class="default-select" bind:value={selectedHour} on:change={pullTickers}>
+					<option value="">All Hours</option>
+					{#each hours as hour}
+						<option value={hour.value}>{hour.label}</option>
+					{/each}
+				</select>
+
+				<button class="action-button" on:click={pullTickers}>Load Tickers</button>
+			</div>
+
+			{#if message}
+				<p class="message">{message}</p>
+			{/if}
+
+			<List
+				on:contextmenu={(event) => {
+					event.preventDefault();
+				}}
+				list={tickerStats}
+				columns={[
+					'Ticker',
+					'total_trades',
+					'win_rate',
+					'winning_trades',
+					'losing_trades',
+					'avg_pnl',
+					'total_pnl'
+				]}
+				displayNames={{
+					Ticker: 'Ticker',
+					total_trades: 'Total Trades',
+					win_rate: 'Win Rate',
+					winning_trades: 'Winning Trades',
+					losing_trades: 'Losing Trades',
+					avg_pnl: 'Avg P/L',
+					total_pnl: 'Total P/L'
+				}}
+				formatters={{
+					win_rate: (value) => `${value}%`,
+					avg_pnl: (value) => `$${value.toFixed(2)}`,
+					total_pnl: (value) => `$${value.toFixed(2)}`
+				}}
+				expandable={true}
+				expandedContent={(ticker) => ({
+					trades: ticker.trades.map((t) => ({
+						time: UTCTimestampToESTString(t.time),
+						type: t.type,
+						price: `$${t.price.toFixed(2)}`,
+						shares: t.shares
+					}))
+				})}
+			/>
+		</div>
+	{/if}
+
+	<!-- Statistics Tab -->
+	{#if activeTab === 'statistics'}
+		<div class="tab-content">
+			<h2>Trading Statistics</h2>
+
+			<div class="filters-section">
+				<input
+					type="text"
+					placeholder="Ticker"
+					bind:value={statTicker}
+					on:change={fetchStatistics}
+				/>
+				<div class="date-range">
 					<input
-						class="input"
-						bind:this={newNameInput}
-						on:keydown={(event) => {
-							if (event.key === 'Enter') {
-								newWatchlist();
-							} else if (event.key === 'Escape') {
-								showWatchlistInput = false;
-								selectWatchlist(String(currentWatchlistId));
-							}
-						}}
-						bind:value={newWatchlistName}
-						placeholder="New Watchlist Name"
+						type="date"
+						bind:value={statStartDate}
+						on:change={fetchStatistics}
+						placeholder="Start Date"
 					/>
-					<div class="new-watchlist-buttons">
-						<button class="utility-button" on:click={newWatchlist}>✓</button>
-						<button
-							class="utility-button"
-							on:click={() => {
-								showWatchlistInput = false;
-								selectWatchlist(String(currentWatchlistId));
-							}}>✕</button
-						>
+					<span class="date-separator">to</span>
+					<input
+						type="date"
+						bind:value={statEndDate}
+						on:change={fetchStatistics}
+						placeholder="End Date"
+					/>
+				</div>
+				<button class="action-button" on:click={fetchStatistics}>Load Statistics</button>
+			</div>
+
+			{#if $statistics}
+				<div class="statistics-grid">
+					<div class="stat-card">
+						<h3>Win Rate</h3>
+						<p>{$statistics.win_rate}%</p>
+						<small>({$statistics.winning_trades}/{$statistics.total_trades} trades)</small>
+					</div>
+
+					<div class="stat-card">
+						<h3>Average Gain</h3>
+						<p class="positive">${$statistics.avg_win}</p>
+					</div>
+
+					<div class="stat-card">
+						<h3>Average Loss</h3>
+						<p class="negative">${$statistics.avg_loss}</p>
+					</div>
+
+					<div class="stat-card">
+						<h3>Total P&L</h3>
+						<p class={$statistics.total_pnl >= 0 ? 'positive' : 'negative'}>
+							${$statistics.total_pnl}
+						</p>
 					</div>
 				</div>
+
+				{#if $statistics?.top_trades && $statistics?.bottom_trades}
+					<div class="best-worst-container">
+						<div class="trade-list">
+							<h3>Top Trades</h3>
+							<List
+								list={writable($statistics.top_trades)}
+								columns={['timestamp', 'ticker', 'direction', 'pnl']}
+								displayNames={{
+									timestamp: 'Date',
+									ticker: 'Ticker',
+									direction: 'Direction',
+									pnl: 'P/L'
+								}}
+								formatters={{
+									timestamp: (value) => UTCTimestampToESTString(Number(value)),
+									pnl: (value) => `$${value.toFixed(2)}`
+								}}
+							/>
+						</div>
+
+						<div class="trade-list">
+							<h3>Bottom Trades</h3>
+							<List
+								list={writable($statistics.bottom_trades)}
+								columns={['timestamp', 'ticker', 'direction', 'pnl']}
+								displayNames={{
+									timestamp: 'Date',
+									ticker: 'Ticker',
+									direction: 'Direction',
+									pnl: 'P/L'
+								}}
+								formatters={{
+									timestamp: (value) => UTCTimestampToESTString(Number(value)),
+									pnl: (value) => `$${value.toFixed(2)}`
+								}}
+							/>
+						</div>
+					</div>
+				{/if}
+
+				{#if $statistics?.hourly_stats}
+					<div class="hourly-stats-container">
+						<h3>Performance by Hour</h3>
+						<table class="hourly-stats-table">
+							<thead>
+								<tr class="defalt-tr">
+									<th class="defalt-th">Hour</th>
+									<th class="defalt-th">Total Trades</th>
+									<th class="defalt-th">Win Rate</th>
+									<th class="defalt-th">Winning Trades</th>
+									<th class="defalt-th">Losing Trades</th>
+									<th class="defalt-th">Avg P/L</th>
+									<th class="defalt-th">Total P/L</th>
+								</tr>
+							</thead>
+							<tbody>
+								{#each $statistics.hourly_stats as stat}
+									<tr class:profitable={stat.total_pnl > 0}>
+										<td class="defalt-td">{stat.hour_display}</td>
+										<td class="defalt-td">{stat.total_trades}</td>
+										<td class="defalt-td">{stat.win_rate}%</td>
+										<td class="defalt-td">{stat.winning_trades}</td>
+										<td class="defalt-td">{stat.losing_trades}</td>
+										<td class={stat.avg_pnl >= 0 ? 'positive' : 'negative'}>
+											${stat.avg_pnl}
+										</td>
+										<td class={stat.total_pnl >= 0 ? 'positive' : 'negative'}>
+											${stat.total_pnl}
+										</td>
+									</tr>
+								{/each}
+							</tbody>
+						</table>
+					</div>
+				{/if}
+
+				{#if $statistics?.ticker_stats}
+					<div class="ticker-stats-container">
+						<h3>Performance by Ticker</h3>
+						<List
+							list={writable($statistics.ticker_stats)}
+							columns={['ticker', 'total_trades', 'win_rate', 'winning_trades', 'losing_trades', 'avg_pnl', 'total_pnl']}
+							displayNames={{
+								ticker: 'Ticker',
+								total_trades: 'Total Trades',
+								win_rate: 'Win Rate',
+								winning_trades: 'Winning Trades',
+								losing_trades: 'Losing Trades',
+								avg_pnl: 'Avg P/L',
+								total_pnl: 'Total P/L'
+							}}
+							formatters={{
+								win_rate: (value) => `${value}%`,
+								avg_pnl: (value) => `$${value}`,
+								total_pnl: (value) => `$${value}`
+							}}
+							rowClass={(item) => item.total_pnl > 0 ? 'profitable' : 'unprofitable'}
+						/>
+					</div>
+				{/if}
+			{:else}
+				<p>Loading statistics...</p>
 			{/if}
-		{/if}
-	</div>
+		</div>
+	{/if}
 
-	<!-- Shortcut buttons between controls and list -->
-	<div class="shortcut-container">
-		{#if Array.isArray($watchlists)}
-			{#each $watchlists as watchlist}
-				<button
-					class="shortcut-button {currentWatchlistId === watchlist.watchlistId ? 'active' : ''}"
-					on:click={() => selectWatchlist(String(watchlist.watchlistId))}
-				>
-					{getWatchlistInitial(watchlist.watchlistName)}
-				</button>
-			{/each}
-		{/if}
-	</div>
-
-	<List
-		parentDelete={deleteItem}
-		columns={['Ticker', 'Price', 'Chg', 'Chg%', 'Ext']}
-		list={activeList}
-	/>
+	<!-- Other Tab -->
+	{#if activeTab === 'other'}
+		<div class="tab-content">
+			<h2>Other</h2>
+			<p>Additional content coming soon...</p>
+		</div>
+	{/if}
 </div>
 
 <style>
-	.watchlist-selector {
+	.account-container {
+		padding: 20px;
+		color: white;
+		width: 100%;
+		min-width: 0; /* Allow container to shrink */
+		overflow-x: auto; /* Enable horizontal scrolling if needed */
+	}
+
+	.tab-navigation {
+		display: flex;
+		gap: 10px;
+		margin-bottom: 20px;
+		border-bottom: 1px solid #444;
+		padding-bottom: 10px;
+		flex-wrap: wrap; /* Allow wrapping */
+	}
+
+	.tab-navigation button.active {
+		color: white;
+		background-color: #444;
+	}
+
+	.tab-navigation button:hover {
+		color: white;
+		background-color: #333;
+	}
+
+	.tab-content {
+		padding: 20px 0;
+	}
+
+	.upload-section {
+		display: flex;
+		gap: 10px;
+		align-items: center;
+		margin-bottom: 20px;
+		flex-wrap: wrap; /* Allow wrapping */
+	}
+
+	.upload-section button,
+	.upload-section input {
+		flex: 0 1 auto;
+		min-width: 80px;
+		max-width: 200px;
+		width: auto;
+	}
+
+	.filters-section {
+		display: flex;
+		gap: 10px;
+		align-items: center;
+		margin-bottom: 20px;
+		flex-wrap: wrap; /* Allow filters to wrap */
+		min-width: 0; /* Allow container to shrink */
+	}
+
+	.filters-section button,
+	.filters-section input,
+	.filters-section select {
+		flex: 0 1 auto; /* Allow shrinking */
+		min-width: 80px; /* Minimum width before wrapping */
+		max-width: 200px; /* Maximum width */
+		width: auto; /* Let it be flexible */
+	}
+
+	.message {
+		margin-top: 10px;
+		color: #ddd;
+	}
+
+	select,
+	input[type='date'],
+	input[type='text'] {
+		padding: 8px;
+		background-color: #333;
+		color: white;
+		border: 1px solid #444;
+		border-radius: 4px;
+	}
+
+	select option {
+		background-color: #333;
+		color: white;
+	}
+
+	.statistics-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+		gap: 20px;
+		margin-top: 20px;
+	}
+
+	.stat-card {
+		background-color: #333;
+		padding: 20px;
+		border-radius: 8px;
+		text-align: center;
+	}
+
+	.stat-card h3 {
+		margin: 0 0 10px 0;
+		font-size: 1.1em;
+		color: #888;
+	}
+
+	.stat-card p {
+		margin: 0;
+		font-size: 1.8em;
+		font-weight: bold;
+	}
+
+	.stat-card small {
+		color: #888;
+		font-size: 0.9em;
+	}
+
+	.positive {
+		color: #4caf50;
+	}
+
+	.negative {
+		color: #f44336;
+	}
+
+	.date-range {
 		display: flex;
 		align-items: center;
 		gap: 8px;
 	}
 
-	.new-watchlist-container {
-		margin-top: 8px;
-		padding: 8px;
-		background: var(--ui-bg-secondary);
-		border-radius: 4px;
-		border: 1px solid var(--ui-border);
+	.date-separator {
+		color: #888;
 	}
 
-	.new-watchlist-container .input {
+	.best-worst-container {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+		gap: 20px;
+		margin-top: 20px;
 		width: 100%;
-		margin-bottom: 8px;
 	}
 
-	.new-watchlist-buttons {
-		display: flex;
-		justify-content: flex-end;
-		gap: 8px;
+	.trade-list {
+		background-color: #333;
+		padding: 15px;
+		border-radius: 8px;
+		width: 100%;
+		overflow-x: auto;
 	}
 
-	.shortcut-container {
-		display: flex;
-		gap: 8px;
-		padding: 8px 8px 8px 16px;
-		flex-wrap: wrap;
+	.trade-list h3 {
+		margin: 0 0 10px 0;
+		color: #888;
+		font-size: 1.1em;
 	}
 
-	/* Ensure existing styles remain */
-	.feature-container {
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
+	.trade-list table {
+		width: 100%;
+		border-collapse: collapse;
+		font-size: 0.9em;
+		table-layout: fixed;
+		min-width: 350px;
 	}
 
-	/* Update existing style */
-	.controls-container {
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
-		padding: 8px 8px 8px 16px;
+	.trade-list th {
+		text-align: left;
+		padding: 8px;
+		border-bottom: 1px solid #444;
+		color: #888;
+	}
+
+	.trade-list th:nth-child(1), 
+	.trade-list td:nth-child(1) {
+		width: 33%;
+	}
+
+	.trade-list th:nth-child(2), 
+	.trade-list td:nth-child(2) {
+		width: 17%;
+	}
+
+	.trade-list th:nth-child(3), 
+	.trade-list td:nth-child(3) {
+		width: 17%;
+	}
+
+	.trade-list th:nth-child(4), 
+	.trade-list td:nth-child(4) {
+		width: 33%;
+		text-align: right;
+		padding-right: 12px;
+	}
+
+	.trade-list td {
+		padding: 8px;
+		border-bottom: 1px solid #444;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.trade-list tr:last-child td {
+		border-bottom: none;
+	}
+
+	.hourly-stats-container {
+		width: 100%;
+		overflow-x: auto;
+		margin-top: 20px;
+	}
+
+	.hourly-stats-container h3 {
+		color: #888;
+		margin-bottom: 15px;
+	}
+
+	.hourly-stats-table {
+		width: 100%;
+		min-width: 600px;
+		max-width: 100%;
+		border-collapse: collapse;
+		font-size: 0.9em;
+	}
+
+	.hourly-stats-table th {
+		text-align: left;
+		padding: 8px;
+		border-bottom: 1px solid #444;
+		color: #888;
+		background-color: #333;
+	}
+
+	.hourly-stats-table td {
+		padding: 8px;
+		border-bottom: 1px solid #444;
+	}
+
+	.hourly-stats-table tr:hover {
+		background-color: #2a2a2a;
+	}
+
+	.hourly-stats-table tr.profitable {
+		background-color: rgba(76, 175, 80, 0.1);
+	}
+
+	.hourly-stats-table tr:not(.profitable) {
+		background-color: rgba(244, 67, 54, 0.1);
+	}
+
+	.positive {
+		color: #4caf50;
+	}
+
+	.negative {
+		color: #f44336;
+	}
+
+	.ticker-stats-container {
+		width: 100%;
+		overflow-x: auto;
+		margin-top: 20px;
+	}
+
+	.ticker-stats-container h3 {
+		color: #888;
+		margin-bottom: 15px;
+	}
+
+	.ticker-stats-table {
+		width: 100%;
+		min-width: 600px;
+		max-width: 100%;
+		border-collapse: collapse;
+		font-size: 0.9em;
+	}
+
+	.ticker-stats-table th {
+		text-align: left;
+		padding: 8px;
+		border-bottom: 1px solid #444;
+		color: #888;
+		background-color: #333;
+	}
+
+	.ticker-stats-table td {
+		padding: 8px;
+		border-bottom: 1px solid #444;
+	}
+
+	.ticker-stats-table tr:hover {
+		background-color: #2a2a2a;
+	}
+
+	.ticker-stats-table tr.profitable {
+		background-color: rgba(76, 175, 80, 0.1);
+	}
+
+	.ticker-stats-table tr:not(.profitable) {
+		background-color: rgba(244, 67, 54, 0.1);
+	}
+
+	:global(.profitable) {
+		background: rgba(76, 175, 80, 0.1) !important;
+	}
+
+	:global(.unprofitable) {
+		background: rgba(244, 67, 54, 0.1) !important;
+	}
+
+	:global(.profitable:hover) {
+		background: rgba(76, 175, 80, 0.2) !important;
+	}
+
+	:global(.unprofitable:hover) {
+		background: rgba(244, 67, 54, 0.2) !important;
+	}
+
+	/* Make tables more responsive */
+	table {
+		width: 100%;
+		min-width: 600px; /* Minimum width before horizontal scroll */
+		max-width: 100%;
+	}
+
+	.delete-button {
+		background-color: #d32f2f;
+		color: white;
+		border: none;
+		padding: 8px 16px;
+		border-radius: 4px;
+		cursor: pointer;
+		margin-left: 8px;
+	}
+
+	.delete-button:hover {
+		background-color: #b71c1c;
+	}
+
+	.delete-button:disabled {
+		background-color: #9e9e9e;
+		cursor: not-allowed;
 	}
 </style>
 
+```
+
+```study/worker.py
+<file>/home/aj/dev/study/services/worker/worker.py</file>
+import json, traceback, datetime, psycopg2, redis
+import random
+import os
+
+
+from conn import Conn
+from train import train
+from screen import screen
+from trainerQueue import refillTrainerQueue
+from trade_analysis import find_similar_trades
+from trades import (
+    handle_trade_upload,
+    grab_user_trades,
+    get_trade_statistics,
+    get_ticker_trades,
+    get_ticker_performance,
+    delete_all_user_trades,
+)
+from update_sectors import update_sectors
+from active import update_active
+import time
+
+funcMap = {
+    "train": train,
+    "screen": screen,
+    "refillTrainerQueue": refillTrainerQueue,
+    "handle_trade_upload": handle_trade_upload,
+    "grab_user_trades": grab_user_trades,
+    "update_sectors": update_sectors,
+    "update_active": update_active,
+    "get_trade_statistics": get_trade_statistics,
+    "get_ticker_trades": get_ticker_trades,
+    "get_ticker_performance": get_ticker_performance,
+    "find_similar_trades": find_similar_trades,
+    "delete_all_user_trades": delete_all_user_trades,
+}
+
+
+def packageResponse(result, status):
+    return json.dumps({"status": status, "result": result})
+
+
+def safe_redis_operation(func, *args, **kwargs):
+    """Execute a Redis operation with retry logic and improved timeout handling"""
+    max_retries = int(os.environ.get("REDIS_RETRY_ATTEMPTS", "5"))
+    base_retry_delay = float(os.environ.get("REDIS_RETRY_DELAY", "1"))
+    max_retry_delay = float(os.environ.get("REDIS_MAX_RETRY_DELAY", "10"))  # Cap the maximum delay
+    
+    for attempt in range(max_retries):
+        try:
+            # Special handling for brpop which needs timeout as a positional argument
+            if func.__name__ == 'brpop' and 'timeout' in kwargs:
+                timeout_val = kwargs.pop('timeout')
+                return func(*args, timeout_val)
+            
+            # For all other Redis operations, don't add a timeout parameter
+            # Redis operations like 'set', 'get', 'ping' don't accept a timeout parameter
+            # They rely on the socket_timeout configured at the connection level
+            return func(*args, **kwargs)
+            
+        except redis.exceptions.TimeoutError as e:
+            # Handle timeout errors specifically - these often indicate network issues
+            if attempt < max_retries - 1:
+                retry_delay = min(base_retry_delay * (2 ** attempt), max_retry_delay)
+                jitter = random.uniform(0, 0.1 * retry_delay)  # 10% jitter
+                total_delay = retry_delay + jitter
+                
+                print(f"Redis operation timed out (attempt {attempt+1}/{max_retries}): {e}. Retrying in {total_delay:.2f}s", flush=True)
+                
+                # For timeout errors, we should try to reset the connection if possible
+                if hasattr(func, '__self__') and hasattr(func.__self__, 'connection_pool'):
+                    try:
+                        # Try to reset the connection pool
+                        print("Attempting to reset Redis connection pool...", flush=True)
+                        func.__self__.connection_pool.reset()
+                    except Exception as reset_error:
+                        print(f"Failed to reset connection pool: {reset_error}", flush=True)
+                
+                # Use shorter sleep intervals with checks to allow for cleaner interruption
+                sleep_interval = 0.5
+                sleep_count = int(total_delay / sleep_interval)
+                
+                for _ in range(sleep_count):
+                    time.sleep(sleep_interval)
+                
+                # Sleep any remaining time
+                remaining_time = total_delay - (sleep_count * sleep_interval)
+                if remaining_time > 0:
+                    time.sleep(remaining_time)
+            else:
+                print(f"Redis operation timed out after {max_retries} attempts: {e}", flush=True)
+                raise
+                
+        except redis.exceptions.ConnectionError as e:
+            if attempt < max_retries - 1:
+                # Calculate delay with exponential backoff and jitter, but cap it
+                retry_delay = min(base_retry_delay * (2 ** attempt), max_retry_delay)
+                jitter = random.uniform(0, 0.1 * retry_delay)  # 10% jitter
+                total_delay = retry_delay + jitter
+                
+                print(f"Redis connection error (attempt {attempt+1}/{max_retries}): {e}. Retrying in {total_delay:.2f}s", flush=True)
+                
+                # Use shorter sleep intervals with checks to allow for cleaner interruption
+                sleep_interval = 0.5
+                sleep_count = int(total_delay / sleep_interval)
+                
+                for _ in range(sleep_count):
+                    time.sleep(sleep_interval)
+                
+                # Sleep any remaining time
+                remaining_time = total_delay - (sleep_count * sleep_interval)
+                if remaining_time > 0:
+                    time.sleep(remaining_time)
+            else:
+                print(f"Redis connection error after {max_retries} attempts: {e}", flush=True)
+                raise
+        except Exception as e:
+            print(f"Unexpected Redis error: {e}", flush=True)
+            if attempt < max_retries - 1:
+                retry_delay = min(base_retry_delay * (2 ** attempt), max_retry_delay)
+                print(f"Retrying in {retry_delay:.2f}s", flush=True)
+                time.sleep(retry_delay)
+            else:
+                raise
+
+def process_tasks():
+    data = None
+    reconnect_delay = 1
+    max_reconnect_delay = 30  # Reduced from 60 to avoid long waits
+    
+    while True:
+        try:
+            if data is None:
+                data = Conn(True)
+                print("Successfully connected to both database and Redis", flush=True)
+                # Reset reconnect delay after successful connection
+                reconnect_delay = 1
+            
+            print("starting queue listening", flush=True)
+            
+            while True:
+                try:
+                    # Use a shorter timeout for brpop to allow for more frequent connection checks
+                    task = safe_redis_operation(data.cache.brpop, "queue", timeout=5)
+                    
+                    if not task:
+                        # No task received, check connection and continue
+                        try:
+                            # Ping Redis to keep connection alive
+                            safe_redis_operation(data.cache.ping)
+                            # Reset backoff on successful check
+                            reconnect_delay = 1
+                        except Exception as e:
+                            print(f"Connection check failed: {e}", flush=True)
+                            # Try to reset the connection pool before raising
+                            try:
+                                data.cache.connection_pool.reset()
+                                print("Reset Redis connection pool after failed ping", flush=True)
+                            except Exception as reset_error:
+                                print(f"Failed to reset connection pool: {reset_error}", flush=True)
+                            raise  # Re-raise to trigger reconnection
+                    else:
+                        _, task_message = task
+                        task_data = json.loads(task_message)
+                        task_id, func_ident, args = (
+                            task_data["id"],
+                            task_data["func"],
+                            task_data["args"],
+                        )
+
+                        print(f"starting {func_ident} {args} {task_id}", flush=True)
+                        try:
+                            # Set task status to running
+                            try:
+                                safe_redis_operation(data.cache.set, task_id, json.dumps("running"))
+                            except Exception as e:
+                                print(f"Failed to set task status to running: {e}", flush=True)
+                                # Continue with task execution even if status update fails
+                            
+                            start = datetime.datetime.now()
+                            result = funcMap[func_ident](data, **args)
+
+                            # Set task status to completed
+                            try:
+                                safe_redis_operation(data.cache.set, task_id, packageResponse(result, "completed"))
+                                print(f"finished {func_ident} {args} time: {datetime.datetime.now() - start}", flush=True)
+                            except Exception as e:
+                                print(f"Failed to set task status to completed: {e}", flush=True)
+                                # Task was executed successfully but status update failed
+                            
+                            # Ping Redis after task completion to keep connection alive
+                            try:
+                                safe_redis_operation(data.cache.ping)
+                            except Exception as e:
+                                print(f"Failed to ping Redis after task completion: {e}", flush=True)
+                                # Try to reset the connection pool
+                                try:
+                                    data.cache.connection_pool.reset()
+                                    print("Reset Redis connection pool after failed ping", flush=True)
+                                except Exception as reset_error:
+                                    print(f"Failed to reset connection pool: {reset_error}", flush=True)
+                        except psycopg2.InterfaceError:
+                            exception = traceback.format_exc()
+                            try:
+                                safe_redis_operation(data.cache.set, task_id, packageResponse(exception, "error"))
+                            except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as redis_err:
+                                print(f"Redis connection error when setting task error status: {redis_err}", flush=True)
+                                # Try to reset the connection pool
+                                try:
+                                    data.cache.connection_pool.reset()
+                                    print("Reset Redis connection pool after connection error", flush=True)
+                                except Exception as reset_error:
+                                    print(f"Failed to reset connection pool: {reset_error}", flush=True)
+                            print(exception, flush=True)
+                            # Check and potentially reconnect to the database
+                            try:
+                                data.check_connection()
+                            except Exception as conn_err:
+                                print(f"Failed to check/reconnect to database: {conn_err}", flush=True)
+                                # Force a full reconnection on the next iteration
+                                data = None
+                                break
+                        except Exception:
+                            exception = traceback.format_exc()
+                            try:
+                                safe_redis_operation(data.cache.set, task_id, packageResponse(exception, "error"))
+                            except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as redis_err:
+                                print(f"Redis connection error when setting task error status: {redis_err}", flush=True)
+                                # Try to reset the connection pool
+                                try:
+                                    data.cache.connection_pool.reset()
+                                    print("Reset Redis connection pool after connection error", flush=True)
+                                except Exception as reset_error:
+                                    print(f"Failed to reset connection pool: {reset_error}", flush=True)
+                            print(exception, flush=True)
+                
+                except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as e:
+                    print(f"Redis connection error in task loop: {e}", flush=True)
+                    print("Attempting to reconnect...", flush=True)
+                    # Try to reset the connection pool before breaking
+                    try:
+                        data.cache.connection_pool.reset()
+                        print("Reset Redis connection pool after connection error", flush=True)
+                    except Exception as reset_error:
+                        print(f"Failed to reset connection pool: {reset_error}", flush=True)
+                    # Break inner loop to reinitialize connection
+                    data = None
+                    break
+        
+        except Exception as e:
+            print(f"Error in main process loop: {e}", flush=True)
+            print(traceback.format_exc(), flush=True)
+            
+            # Reset connection
+            data = None
+            
+            # Sleep with exponential backoff before retrying, but with a more reasonable cap
+            print(f"Retrying connection in {reconnect_delay} seconds...", flush=True)
+            
+            # Use shorter sleep intervals with checks to allow for cleaner interruption
+            sleep_interval = 1
+            sleep_count = int(reconnect_delay / sleep_interval)
+            
+            for _ in range(sleep_count):
+                time.sleep(sleep_interval)
+            
+            # Sleep any remaining time
+            remaining_time = reconnect_delay - (sleep_count * sleep_interval)
+            if remaining_time > 0:
+                time.sleep(remaining_time)
+            
+            # Increase backoff for next attempt, but cap it
+            reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
+
+
+if __name__ == "__main__":
+    process_tasks()
+
+```
+
+```study/trade_analysis.py
+<file>/home/aj/dev/study/services/worker/trade_analysis.py</file>
+from decimal import Decimal
+import numpy as np
+import pandas as pd
+from datetime import datetime, timedelta
+import pytz
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, LSTM, Bidirectional, Conv1D, Input
+from tensorflow.keras.optimizers import Adam
+
+
+def normalize_pattern(pattern):
+    """Normalize OHLCV data"""
+    # First close price for normalization
+    first_close = pattern[0, 3]  # Using first row's close price
+
+    # Avoid division by zero
+    if first_close == 0:
+        return np.zeros_like(pattern)
+
+    # Normalize OHLC by the first close price
+    normalized = np.copy(pattern)
+    normalized[:, :4] = pattern[:, :4] / first_close - 1
+
+    # Normalize volume if present (5th column)
+    if pattern.shape[1] > 4:
+        max_vol = np.max(pattern[:, 4])
+        if max_vol > 0:
+            normalized[:, 4] = pattern[:, 4] / max_vol
+
+    return normalized
+
+
+def get_trade_patterns(conn, lookback_bars=30):
+    """
+    Get OHLCV patterns for all trades in the database using direct Polygon API calls
+    """
+    try:
+        with conn.db.cursor() as cursor:
+            # Get all completed trades with non-null values
+            cursor.execute(
+                """
+                SELECT 
+                    t.tradeId,
+                    t.ticker,
+                    t.entry_times[1] as first_entry,
+                    t.tradeDirection,
+                    COALESCE(t.closedPnL, 0) as closedPnL
+                FROM trades t
+                WHERE t.status = 'Closed'
+                    AND t.tradeId IS NOT NULL 
+                    AND t.ticker IS NOT NULL 
+                    AND t.entry_times[1] IS NOT NULL
+                    AND t.tradeDirection IS NOT NULL
+                ORDER BY t.entry_times[1]
+            """
+            )
+
+            trades = cursor.fetchall()
+
+            patterns = []
+            trade_info = []
+
+            for trade in trades:
+                trade_id = int(trade[0]) if trade[0] else None
+                if not trade_id:
+                    continue
+
+                ticker = trade[1]
+                entry_time = trade[2]
+
+                # Calculate time range for data fetch
+                end_time = entry_time
+                start_time = end_time - timedelta(minutes=lookback_bars)
+
+                # Get aggregates from Polygon
+                aggs_iter, err = conn.polygon.GetAggsData(
+                    ticker=ticker,
+                    multiplier=1,
+                    timeframe="minute",
+                    from_millis=int(start_time.timestamp() * 1000),
+                    to_millis=int(end_time.timestamp() * 1000),
+                    bars=lookback_bars,
+                    results_order="asc",
+                    is_adjusted=True,
+                )
+
+                if err:
+                    print(f"Error fetching data for {ticker}: {err}")
+                    continue
+
+                # Convert aggs to numpy array
+                ohlcv_data = []
+                for agg in aggs_iter:
+                    ohlcv_data.append(
+                        [agg.Open, agg.High, agg.Low, agg.Close, agg.Volume]
+                    )
+
+                if len(ohlcv_data) < lookback_bars:
+                    continue
+
+                pattern = np.array(ohlcv_data[-lookback_bars:])
+                normalized_pattern = normalize_pattern(pattern)
+                patterns.append(normalized_pattern.flatten())
+
+                trade_info.append(
+                    {
+                        "trade_id": trade_id,
+                        "ticker": ticker,
+                        "entry_time": entry_time,
+                        "direction": trade[3],
+                        "pnl": float(trade[4]) if trade[4] else 0.0,
+                    }
+                )
+
+            if patterns:
+                return np.array(patterns), trade_info
+
+            return None, None
+
+    except Exception as e:
+        print(f"Error getting trade patterns: {str(e)}")
+        return None, None
+
+
+def find_similar_trades(conn, trade_id, user_id, n_neighbors=5):
+    """
+    Find similar trades using TensorFlow's distance calculations
+    """
+    try:
+        # Get patterns for all trades
+        patterns, trade_ids = get_trade_patterns(conn)
+
+        if patterns is None or len(patterns) < n_neighbors:
+            return []
+
+        # Find the index of our target trade
+        target_idx = None
+        for i, t in enumerate(trade_ids):
+            if t["trade_id"] == trade_id:
+                target_idx = i
+                break
+
+        if target_idx is None:
+            return []
+
+        # Convert patterns to TensorFlow tensors
+        patterns_tensor = tf.convert_to_tensor(patterns, dtype=tf.float32)
+        target_pattern = tf.convert_to_tensor([patterns[target_idx]], dtype=tf.float32)
+
+        # Calculate Euclidean distances using TensorFlow
+        distances = tf.norm(patterns_tensor - target_pattern, axis=1)
+
+        # Get indices of k nearest neighbors
+        _, indices = tf.nn.top_k(-distances, k=n_neighbors + 1)
+        distances = distances.numpy()
+        indices = indices.numpy()
+
+        # Get similar trades (skip first one as it's the same trade)
+        similar_trades = []
+        for idx in indices[1:]:
+            distance = distances[idx]
+            trade_info = trade_ids[idx]
+
+            # Calculate similarity score (0 to 1, where 1 is most similar)
+            similarity_score = 1 / (1 + distance)
+
+            similar_trades.append(
+                {
+                    "trade_id": trade_info["trade_id"],
+                    "ticker": trade_info["ticker"],
+                    "entry_time": trade_info["entry_time"].isoformat(),
+                    "direction": trade_info["direction"],
+                    "pnl": trade_info["pnl"],
+                    "similarity_score": float(similarity_score),
+                }
+            )
+
+        return similar_trades
+
+    except Exception as e:
+        print(f"Error finding similar trades: {str(e)}")
+        return []
+
+```
+
+```study/trades.py
+<file>/home/aj/dev/study/services/worker/trades.py</file>
+import base64
+import pandas as pd
+import io
+from screen import getCurrentSecId
+import traceback
+from datetime import datetime
+from decimal import Decimal
+import pytz
+from trade_helpers import parse_datetime, calculate_pnl, process_trades
+
+
+def grab_user_trades(
+    conn,
+    user_id: int,
+    sort: str = "desc",
+    date: str = None,
+    hour: int = None,
+    ticker: str = None,
+):
+    """
+    Fetch all trades for a user with optional sorting and filtering
+
+    Args:
+        conn: Database connection
+        user_id (int): User ID
+        sort (str): Sort direction - "asc" or "desc"
+        date (str): Optional date filter in format 'YYYY-MM-DD'
+        hour (int): Optional hour filter (0-23)
+        ticker (str): Optional ticker filter
+    """
+    try:
+        with conn.db.cursor() as cursor:
+            base_query = """
+                SELECT 
+                    t.*,
+                    array_length(entry_times, 1) as num_entries,
+                    array_length(exit_times, 1) as num_exits
+                FROM trades t
+                WHERE t.userId = %s
+            """
+            params = [user_id]
+
+            # Modified ticker filter to include options
+            if ticker:
+                base_query += " AND (t.ticker = %s OR t.ticker LIKE %s)"
+                params.extend(
+                    [ticker, f"{ticker}%"]
+                )  # Add both exact match and LIKE pattern
+
+            # Add other existing filters
+            if date:
+                base_query += " AND DATE(t.entry_times[1]) = %s"
+                params.append(date)
+
+            if hour is not None:
+                base_query += " AND EXTRACT(HOUR FROM t.entry_times[1]) = %s"
+                params.append(hour)
+
+            # Add sorting
+            sort_direction = "DESC" if sort.lower() == "desc" else "ASC"
+            base_query += f" ORDER BY t.entry_times[1] {sort_direction}"
+
+            cursor.execute(base_query, tuple(params))
+
+            trades = []
+            eastern = pytz.timezone("America/New_York")
+            utc = pytz.UTC
+
+            for row in cursor.fetchall():
+                # Convert EST timestamp to UTC before getting Unix timestamp
+                est_time = eastern.localize(row[9][0]) if row[9] else None
+                utc_time = est_time.astimezone(utc) if est_time else None
+                timestamp = int(utc_time.timestamp() * 1000) if utc_time else None
+
+                # Create combined trades array sorted by timestamp
+                combined_trades = []
+
+                # Add entries
+                for i in range(len(row[9])) if row[9] else []:
+                    combined_trades.append(
+                        {
+                            "time": eastern.localize(row[9][i])
+                            .astimezone(utc)
+                            .timestamp()
+                            * 1000,
+                            "price": float(row[10][i]),
+                            "shares": row[11][i],
+                            "type": "Short" if row[4] == "Short" else "Buy",
+                        }
+                    )
+
+                # Add exits
+                for i in range(len(row[12])) if row[12] else []:
+                    combined_trades.append(
+                        {
+                            "time": eastern.localize(row[12][i])
+                            .astimezone(utc)
+                            .timestamp()
+                            * 1000,
+                            "price": float(row[13][i]),
+                            "shares": row[14][i],
+                            "type": (
+                                "Buy to Cover"
+                                if row[4] == "Short" and row[7] <= 0
+                                else "Sell"
+                            ),
+                        }
+                    )
+
+                # Sort combined trades by timestamp
+                combined_trades.sort(key=lambda x: x["time"])
+
+                trade = {
+                    "tradeId": row[0],
+                    "ticker": row[3],
+                    "securityId": row[2],
+                    "tradeStart": (
+                        eastern.localize(row[9][0]).astimezone(utc).timestamp() * 1000
+                        if row[9]
+                        else None
+                    ),
+                    "timestamp": (
+                        eastern.localize(row[12][-1]).astimezone(utc).timestamp() * 1000
+                        if row[12]
+                        else (
+                            eastern.localize(row[9][0]).astimezone(utc).timestamp()
+                            * 1000
+                            if row[9]
+                            else None
+                        )
+                    ),
+                    "trade_direction": row[4],
+                    "date": row[5].strftime("%Y-%m-%d"),
+                    "status": row[6],
+                    "openQuantity": row[7],
+                    "closedPnL": float(row[8]) if row[8] else None,
+                    "trades": combined_trades,
+                }
+                trades.append(trade)
+
+            return trades
+
+    except Exception as e:
+        error_info = traceback.format_exc()
+        print(f"Error fetching trades:\n{error_info}")
+        return []
+
+
+def handle_trade_upload(
+    conn, file_content: str, user_id: int, additional_args: dict = None
+) -> dict:
+    """
+    Process uploaded trade file and return parsed trades
+    """
+    try:
+        # Decode base64 string back to bytes
+        file_bytes = base64.b64decode(file_content)
+
+        # Read CSV from bytes using pandas
+        df = pd.read_csv(
+            io.BytesIO(file_bytes),
+            skiprows=3,
+            dtype={
+                "Order Time": str,
+                "Trade Description": str,  # Ensure Trade Description is read as string
+                "Status": str,
+            },
+        )
+        df = df.dropna(how="all")
+
+        # Start a single transaction for all trades
+        with conn.db.cursor() as cursor:
+            for i in range(len(df) - 1, -1, -1):
+                trade = df.iloc[i]
+                trade_description = trade["Trade Description"]
+                fidelity_trade_status = trade["Status"]
+
+                if (
+                    "Short" in trade_description
+                    or "Sell to Open" in trade_description
+                    or "Buy to Cover" in trade_description
+                    or "Buy to Close" in trade_description
+                ):
+                    trade_direction = "Short"
+                else:
+                    trade_direction = "Long"
+
+                trade_dt, trade_date = parse_datetime(trade["Order Time"])
+                ticker = trade["Symbol"]
+                securityId = getCurrentSecId(conn, ticker)
+
+                if "Limit" in trade_description or "Stop Loss" in trade_description:
+                    if "FILLED AT" in fidelity_trade_status:
+                        trade_price = float(
+                            fidelity_trade_status.split("$")[1].replace(",", "")
+                        )
+                        trade_shares = float(trade["Quantity"].replace(",", ""))
+                    elif "PARTIAL" in fidelity_trade_status:
+                        trade_shares = float(
+                            fidelity_trade_status.split("\n")[3]
+                            .split(" ")[0]
+                            .replace(",", "")
+                        )
+                        description_split = trade_description.split("$")
+                        if len(description_split) == 2:
+                            trade_price = float(description_split[1].replace(",", ""))
+                        elif len(description_split) == 3:
+                            trade_price = float(description_split[2].replace(",", ""))
+                elif "Market" in trade_description:
+                    trade_price = float(
+                        fidelity_trade_status.split("$")[1].replace(",", "")
+                    )
+                    trade_shares = float(trade["Quantity"].replace(",", ""))
+
+                if "Sell" in trade_description or "Short" in trade_description:
+                    trade_shares = -trade_shares
+
+                cursor.execute(
+                    """
+                    INSERT INTO trade_executions 
+                    (userId, securityId, ticker, date, price, size, timestamp, direction)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                    (
+                        user_id,
+                        securityId,
+                        ticker,
+                        trade_date,
+                        trade_price,
+                        trade_shares,
+                        trade_dt,
+                        trade_direction,
+                    ),
+                )
+
+            # Commit the transaction after all trades are processed
+            conn.db.commit()
+        process_trades(conn, user_id)
+        return {"status": "success", "message": "Trades uploaded successfully"}
+    except Exception as e:
+        # Rollback on error
+        conn.db.rollback()
+        error_info = traceback.format_exc()
+        print(f"Error processing trade file:\n{error_info}")
+        return {
+            "status": "error",
+            "message": f"Error: {str(e)}\nTraceback:\n{error_info}",
+        }
+
+
+def get_trade_statistics(
+    conn, user_id: int, start_date: str = None, end_date: str = None, ticker: str = None
+) -> dict:
+    """
+    Calculate trading statistics for a user within a date range
+
+    Args:
+        conn: Database connection
+        user_id (int): User ID
+        start_date (str): Optional start date filter in format 'YYYY-MM-DD'
+        end_date (str): Optional end date filter in format 'YYYY-MM-DD'
+        ticker (str): Optional ticker filter
+    """
+    try:
+        with conn.db.cursor() as cursor:
+            query = """
+                SELECT 
+                    COUNT(*) as total_trades,
+                    COUNT(CASE WHEN closedPnL > 0 THEN 1 END) as winning_trades,
+                    COUNT(CASE WHEN closedPnL <= 0 THEN 1 END) as losing_trades,
+                    AVG(CASE WHEN closedPnL > 0 THEN closedPnL END) as avg_win,
+                    AVG(CASE WHEN closedPnL <= 0 THEN closedPnL END) as avg_loss,
+                    COALESCE(SUM(closedPnL), 0) as total_pnl
+                FROM trades 
+                WHERE userId = %s 
+                AND status = 'Closed'
+                AND closedPnL IS NOT NULL
+            """
+            params = [user_id]
+
+            # Modified ticker filter to include options
+            if ticker:
+                query += " AND (ticker = %s OR ticker LIKE %s)"
+                params.extend([ticker, f"{ticker}%"])
+
+            # Rest of the existing date filters
+            if start_date:
+                query += " AND DATE(entry_times[1]) >= %s"
+                params.append(start_date)
+
+            if end_date:
+                query += " AND DATE(entry_times[1]) <= %s"
+                params.append(end_date)
+
+            cursor.execute(query, tuple(params))
+            row = cursor.fetchone()
+
+            total_trades = row[0]
+            winning_trades = row[1]
+            losing_trades = row[2]
+            avg_win = float(row[3]) if row[3] else 0
+            avg_loss = float(row[4]) if row[4] else 0
+            total_pnl = float(row[5]) if row[5] else 0
+
+            win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
+
+            # Update P/L curve query with modified ticker filter
+            pnl_query = """
+                SELECT 
+                    entry_times[1] as trade_time,
+                    closedPnL
+                FROM trades 
+                WHERE userId = %s 
+                AND status = 'Closed'
+                AND closedPnL IS NOT NULL
+            """
+            params = [user_id]
+
+            if start_date:
+                pnl_query += " AND DATE(entry_times[1]) >= %s"
+                params.append(start_date)
+
+            if end_date:
+                pnl_query += " AND DATE(entry_times[1]) <= %s"
+                params.append(end_date)
+
+            if ticker:
+                pnl_query += " AND (ticker = %s OR ticker LIKE %s)"
+                params.extend([ticker, f"{ticker}%"])
+
+            pnl_query += " ORDER BY entry_times[1] ASC"
+
+            # Update trades query for top/bottom trades
+            trades_query = """
+                SELECT 
+                    ticker,
+                    entry_times[1] as trade_time,
+                    tradedirection,
+                    closedPnL
+                FROM trades 
+                WHERE userId = %s 
+                AND status = 'Closed'
+                AND closedPnL IS NOT NULL
+            """
+            params = [user_id]
+
+            if start_date:
+                trades_query += " AND DATE(entry_times[1]) >= %s"
+                params.append(start_date)
+
+            if end_date:
+                trades_query += " AND DATE(entry_times[1]) <= %s"
+                params.append(end_date)
+
+            if ticker:
+                trades_query += " AND (ticker = %s OR ticker LIKE %s)"
+                params.extend([ticker, f"{ticker}%"])
+
+            # Update hourly query
+            hourly_query = """
+                SELECT 
+                    EXTRACT(HOUR FROM entry_times[1]) as hour,
+                    COUNT(*) as total_trades,
+                    COUNT(CASE WHEN closedPnL > 0 THEN 1 END) as winning_trades,
+                    COUNT(CASE WHEN closedPnL <= 0 THEN 1 END) as losing_trades,
+                    AVG(closedPnL) as avg_pnl,
+                    SUM(closedPnL) as total_pnl
+                FROM trades 
+                WHERE userId = %s 
+                AND status = 'Closed'
+                AND closedPnL IS NOT NULL
+            """
+            params = [user_id]
+
+            if start_date:
+                hourly_query += " AND DATE(entry_times[1]) >= %s"
+                params.append(start_date)
+
+            if end_date:
+                hourly_query += " AND DATE(entry_times[1]) <= %s"
+                params.append(end_date)
+
+            if ticker:
+                hourly_query += " AND (ticker = %s OR ticker LIKE %s)"
+                params.extend([ticker, f"{ticker}%"])
+
+            hourly_query += " GROUP BY EXTRACT(HOUR FROM entry_times[1]) ORDER BY hour"
+
+            # Update verification query
+            verification_query = """
+                SELECT COALESCE(SUM(closedPnL), 0) as verification_total
+                FROM trades 
+                WHERE userId = %s 
+                AND status = 'Closed'
+                AND closedPnL IS NOT NULL
+            """
+            verification_params = [user_id]
+
+            if start_date:
+                verification_query += " AND DATE(entry_times[1]) >= %s"
+                verification_params.append(start_date)
+            if end_date:
+                verification_query += " AND DATE(entry_times[1]) <= %s"
+                verification_params.append(end_date)
+            if ticker:
+                verification_query += " AND (ticker = %s OR ticker LIKE %s)"
+                verification_params.extend([ticker, f"{ticker}%"])
+
+            cursor.execute(verification_query, tuple(verification_params))
+            verification_total = float(cursor.fetchone()[0])
+
+            cursor.execute(pnl_query, tuple(params))
+            pnl_data = cursor.fetchall()
+
+            cumulative_pnl = []
+            running_total = 0
+            eastern = pytz.timezone("America/New_York")
+            utc = pytz.UTC
+            for row in pnl_data:
+                # Convert EST timestamp to UTC milliseconds
+                trade_time = eastern.localize(row[0]).astimezone(utc)
+                timestamp = int(trade_time.timestamp() * 1000)
+                pnl = float(row[1])
+                running_total += pnl
+                cumulative_pnl.append({"timestamp": timestamp, "value": running_total})
+
+            # Get top 5 trades
+            cursor.execute(
+                trades_query + " ORDER BY closedPnL DESC LIMIT 5", tuple(params)
+            )
+            top_trades = [
+                {
+                    "ticker": row[0],
+                    "timestamp": int(
+                        eastern.localize(row[1]).astimezone(utc).timestamp() * 1000
+                    ),
+                    "direction": row[2],
+                    "pnl": float(row[3]),
+                }
+                for row in cursor.fetchall()
+            ]
+
+            # Get bottom 5 trades, excluding the trade IDs from top trades
+            bottom_trades_query = (
+                trades_query
+                + """
+                AND NOT (ticker, entry_times[1], tradedirection, closedPnL) IN (
+                    SELECT ticker, entry_times[1], tradedirection, closedPnL
+                    FROM trades 
+                    WHERE userId = %s 
+                    AND status = 'Closed'
+                    AND closedPnL IS NOT NULL
+                    ORDER BY closedPnL DESC 
+                    LIMIT 5
+                )
+                ORDER BY closedPnL ASC 
+                LIMIT 5
+            """
+            )
+
+            # Add the user_id parameter again for the subquery
+            bottom_params = params + [user_id]
+            cursor.execute(bottom_trades_query, tuple(bottom_params))
+
+            bottom_trades = [
+                {
+                    "ticker": row[0],
+                    "timestamp": int(
+                        eastern.localize(row[1]).astimezone(utc).timestamp() * 1000
+                    ),
+                    "direction": row[2],
+                    "pnl": float(row[3]),
+                }
+                for row in cursor.fetchall()
+            ]
+
+            # Get hourly statistics
+            cursor.execute(hourly_query, tuple(params))
+            hourly_stats = []
+
+            for row in cursor.fetchall():
+                hour = int(row[0])
+                total = int(row[1])
+                wins = int(row[2])
+                losses = int(row[3])
+                avg_pnl = float(row[4]) if row[4] else 0
+                total_pnl = float(row[5]) if row[5] else 0
+
+                hourly_stats.append(
+                    {
+                        "hour": hour,
+                        "hour_display": f"{hour:02d}:00",
+                        "total_trades": total,
+                        "winning_trades": wins,
+                        "losing_trades": losses,
+                        "win_rate": round((wins / total * 100), 2) if total > 0 else 0,
+                        "avg_pnl": round(avg_pnl, 2),
+                        "total_pnl": round(total_pnl, 2),
+                    }
+                )
+
+            # Fix the ticker statistics query
+            ticker_query = """
+                SELECT 
+                    ticker,
+                    COUNT(*) as total_trades,
+                    COUNT(CASE WHEN closedPnL > 0 THEN 1 END) as winning_trades,
+                    COUNT(CASE WHEN closedPnL <= 0 THEN 1 END) as losing_trades,
+                    AVG(closedPnL) as avg_pnl,
+                    SUM(closedPnL) as total_pnl
+                FROM trades 
+                WHERE userId = %s 
+                AND status = 'Closed'
+                AND closedPnL IS NOT NULL
+                {date_filters}
+                {ticker_filter}
+                GROUP BY ticker
+                ORDER BY total_pnl DESC
+            """
+
+            # Build the query with filters
+            date_filters = ""
+            if start_date:
+                date_filters += " AND DATE(entry_times[1]) >= %s"
+            if end_date:
+                date_filters += " AND DATE(entry_times[1]) <= %s"
+            ticker_filter = " AND (ticker = %s OR ticker LIKE %s)" if ticker else ""
+
+            query = ticker_query.format(
+                date_filters=date_filters, ticker_filter=ticker_filter
+            )
+
+            # Build params list
+            params = [user_id]
+            if start_date:
+                params.append(start_date)
+            if end_date:
+                params.append(end_date)
+            if ticker:
+                params.extend([ticker, f"{ticker}%"])
+
+            cursor.execute(query, tuple(params))
+            ticker_stats = []
+
+            for row in cursor.fetchall():
+                ticker_name = row[0]
+                total = int(row[1])
+                wins = int(row[2])
+                losses = int(row[3])
+                avg_pnl = float(row[4]) if row[4] else 0
+                total_pnl = float(row[5]) if row[5] else 0
+
+                ticker_stats.append(
+                    {
+                        "ticker": ticker_name,
+                        "total_trades": total,
+                        "winning_trades": wins,
+                        "losing_trades": losses,
+                        "win_rate": round((wins / total * 100), 2) if total > 0 else 0,
+                        "avg_pnl": round(avg_pnl, 2),
+                        "total_pnl": round(total_pnl, 2),
+                    }
+                )
+
+            return {
+                "total_trades": total_trades,
+                "winning_trades": winning_trades,
+                "losing_trades": losing_trades,
+                "win_rate": (
+                    round((winning_trades / total_trades * 100), 2)
+                    if total_trades > 0
+                    else 0
+                ),
+                "avg_win": round(avg_win, 2),
+                "avg_loss": round(avg_loss, 2),
+                "total_pnl": round(verification_total, 2),  # Use verified total
+                "pnl_curve": cumulative_pnl,
+                "top_trades": top_trades,
+                "bottom_trades": bottom_trades,
+                "hourly_stats": hourly_stats,
+                "ticker_stats": ticker_stats,
+            }
+
+    except Exception as e:
+        error_info = traceback.format_exc()
+        print(f"Error calculating statistics:\n{error_info}")
+        return {"error": str(e), "traceback": error_info}
+
+
+def get_ticker_trades(
+    conn, user_id: int, ticker: str, start_date: str = None, end_date: str = None
+):
+    """Get all trades for a specific ticker within a date range"""
+    try:
+        with conn.db.cursor() as cursor:
+            query = """
+                SELECT 
+                    securityId,
+                    entry_times,
+                    entry_prices,
+                    exit_times,
+                    exit_prices,
+                    tradedirection
+                FROM trades 
+                WHERE userId = %s 
+                AND ticker = %s
+                AND status = 'Closed'
+            """
+            params = [user_id, ticker]
+
+            if start_date:
+                query += " AND DATE(entry_times[1]) >= %s"
+                params.append(start_date)
+
+            if end_date:
+                query += " AND DATE(entry_times[1]) <= %s"
+                params.append(end_date)
+
+            cursor.execute(query, tuple(params))
+            trades = cursor.fetchall()
+
+            entries = []
+            exits = []
+
+            for trade in trades:
+                security_id = trade[0]
+                entry_times = trade[1]
+                entry_prices = trade[2]
+                exit_times = trade[3]
+                exit_prices = trade[4]
+                direction = trade[5]
+
+                # Process entries
+                for time, price in zip(entry_times, entry_prices):
+                    entries.append(
+                        {
+                            "time": int(time.timestamp() * 1000),
+                            "price": float(price),
+                            "isLong": direction == "Long",
+                        }
+                    )
+
+                # Process exits
+                for time, price in zip(exit_times, exit_prices):
+                    exits.append(
+                        {
+                            "time": int(time.timestamp() * 1000),
+                            "price": float(price),
+                            "isLong": direction == "Long",
+                        }
+                    )
+
+            return {"securityId": security_id, "entries": entries, "exits": exits}
+
+    except Exception as e:
+        error_info = traceback.format_exc()
+        print(f"Error getting ticker trades:\n{error_info}")
+        return {"error": str(e), "traceback": error_info}
+
+
+def get_ticker_performance(
+    conn,
+    user_id: int,
+    sort: str = "desc",
+    date: str = None,
+    hour: int = None,
+    ticker: str = None,
+):
+    """Get performance statistics by ticker with filters"""
+    try:
+        with conn.db.cursor() as cursor:
+            query = """
+                WITH ticker_stats AS (
+                    SELECT 
+                        ticker,
+                        MAX(securityId) as securityId,
+                        COUNT(*) as total_trades,
+                        COUNT(CASE WHEN closedPnL > 0 THEN 1 END) as winning_trades,
+                        COUNT(CASE WHEN closedPnL <= 0 THEN 1 END) as losing_trades,
+                        AVG(closedPnL) as avg_pnl,
+                        SUM(closedPnL) as total_pnl,
+                        MAX(entry_times[1]) as latest_entry,
+                        MAX(exit_times[array_length(exit_times, 1)]) as last_exit
+                    FROM trades 
+                    WHERE userId = %s 
+                    AND status = 'Closed'
+                    AND closedPnL IS NOT NULL
+                    {date_filter}
+                    {hour_filter}
+                    {ticker_filter}
+                    GROUP BY ticker
+                )
+                SELECT 
+                    ts.*,
+                    t.tradeId,
+                    t.entry_times,
+                    t.entry_prices,
+                    t.entry_shares,
+                    t.exit_times,
+                    t.exit_prices,
+                    t.exit_shares,
+                    t.tradedirection,
+                    t.closedPnL
+                FROM ticker_stats ts
+                LEFT JOIN trades t ON ts.ticker = t.ticker
+                WHERE t.userId = %s 
+                AND t.status = 'Closed'
+                AND t.closedPnL IS NOT NULL
+                {date_filter}
+                {hour_filter}
+                {ticker_filter}
+                ORDER BY ts.last_exit {sort_direction}
+            """
+
+            # Modified the ticker filter condition
+            ticker_filter = " AND (ticker = %s OR ticker LIKE %s)" if ticker else ""
+
+            # Replace placeholders in the query
+            query = query.format(
+                date_filter=" AND DATE(entry_times[1]) = %s" if date else "",
+                hour_filter=(
+                    " AND EXTRACT(HOUR FROM entry_times[1]) = %s"
+                    if hour is not None
+                    else ""
+                ),
+                ticker_filter=ticker_filter,
+                sort_direction="DESC" if sort.lower() == "desc" else "ASC",
+            )
+
+            # Build params list with modified ticker parameters
+            params = [user_id]
+            if date:
+                params.append(date)
+            if hour is not None:
+                params.append(hour)
+            if ticker:
+                params.extend([ticker, f"{ticker}%"])
+            # Add params for second part of query
+            params.extend([p for p in [user_id] + params[1:]])
+
+            eastern = pytz.timezone("America/New_York")
+            utc = pytz.UTC
+
+            cursor.execute(query, tuple(params))
+            rows = cursor.fetchall()
+
+            ticker_stats = []
+            current_ticker = None
+            current_stats = None
+
+            for row in rows:
+                ticker_name = row[0]
+
+                if ticker_name != current_ticker:
+                    if current_stats is not None:
+                        ticker_stats.append(current_stats)
+
+                    current_ticker = ticker_name
+                    current_stats = {
+                        "ticker": ticker_name,
+                        "securityId": row[1],
+                        "total_trades": int(row[2]),
+                        "winning_trades": int(row[3]),
+                        "losing_trades": int(row[4]),
+                        "avg_pnl": round(float(row[5]) if row[5] else 0, 2),
+                        "total_pnl": round(float(row[6]) if row[6] else 0, 2),
+                        "timestamp": (
+                            int(
+                                eastern.localize(row[8]).astimezone(utc).timestamp()
+                                * 1000
+                            )
+                            if row[8]
+                            else None
+                        ),
+                        "trades": [],  # Initialize empty trades array
+                    }
+
+                # Add trade details if they exist
+                if row[9] is not None:  # tradeId exists
+                    # Create combined trades array
+                    combined_trades = []
+
+                    # Add entries
+                    for i in range(len(row[10])):
+                        combined_trades.append(
+                            {
+                                "time": int(
+                                    eastern.localize(row[10][i])
+                                    .astimezone(utc)
+                                    .timestamp()
+                                    * 1000
+                                ),
+                                "price": float(row[11][i]),
+                                "shares": float(row[12][i]),
+                                "type": "Short" if row[16] == "Short" else "Buy",
+                            }
+                        )
+
+                    # Add exits
+                    for i in range(len(row[13])):
+                        combined_trades.append(
+                            {
+                                "time": int(
+                                    eastern.localize(row[13][i])
+                                    .astimezone(utc)
+                                    .timestamp()
+                                    * 1000
+                                ),
+                                "price": float(row[14][i]),
+                                "shares": float(row[15][i]),
+                                "type": (
+                                    "Buy to Cover" if row[16] == "Short" else "Sell"
+                                ),
+                            }
+                        )
+
+                    # Sort combined trades by timestamp
+                    combined_trades.sort(key=lambda x: x["time"])
+
+                    # Extend the trades array instead of overwriting it
+                    current_stats["trades"].extend(combined_trades)
+
+                    # Sort all trades by timestamp after adding new ones
+                    current_stats["trades"].sort(key=lambda x: x["time"])
+
+            # Add the last ticker stats
+            if current_stats is not None:
+                ticker_stats.append(current_stats)
+
+            return ticker_stats
+
+    except Exception as e:
+        error_info = traceback.format_exc()
+        print(f"Error getting ticker performance:\n{error_info}")
+        return []
+
+
+def get_similar_trades(conn, trade_id: int, n_neighbors: int = 5):
+    """Get trades similar to the specified trade"""
+    try:
+        from trade_analysis import find_similar_trades
+
+        similar_trades = find_similar_trades(conn, trade_id, n_neighbors)
+
+        if not similar_trades:
+            return {"status": "error", "message": "No similar trades found"}
+
+        return {"status": "success", "similar_trades": similar_trades}
+
+    except Exception as e:
+        error_info = traceback.format_exc()
+        print(f"Error getting similar trades:\n{error_info}")
+        return {"status": "error", "message": str(e), "traceback": error_info}
+
+
+def delete_all_user_trades(conn, user_id: int) -> dict:
+    """
+    Delete all trades and trade executions for a user
+
+    Args:
+        conn: Database connection
+        user_id (int): User ID
+    """
+    try:
+        with conn.db.cursor() as cursor:
+            # Delete all trade executions for the user
+            cursor.execute(
+                """
+                DELETE FROM trade_executions
+                WHERE userId = %s
+            """,
+                (user_id,),
+            )
+            executions_deleted = cursor.rowcount
+
+            # Delete all trades for the user
+            cursor.execute(
+                """
+                DELETE FROM trades
+                WHERE userId = %s
+            """,
+                (user_id,),
+            )
+            trades_deleted = cursor.rowcount
+
+            # Commit the transaction
+            conn.db.commit()
+
+            return {
+                "status": "success",
+                "message": f"Successfully deleted {trades_deleted} trades and {executions_deleted} trade executions",
+                "trades_deleted": trades_deleted,
+                "executions_deleted": executions_deleted,
+            }
+
+    except Exception as e:
+        conn.db.rollback()
+        error_info = traceback.format_exc()
+        print(f"Error deleting trades:\n{error_info}")
+        return {
+            "status": "error",
+            "message": f"Error: {str(e)}",
+            "traceback": error_info,
+        }
+
+```
+
+```study/trade_helpers.py
+<file>/home/aj/dev/study/services/worker/trade_helpers.py</file>
+import base64
+import pandas as pd
+import io
+from screen import getCurrentSecId
+import traceback
+from datetime import datetime
+from decimal import Decimal
+import pytz
+
+
+def parse_datetime(datetime_str):
+    datetime_str = " ".join(datetime_str.split())
+    try:
+        dt = datetime.strptime(datetime_str, "%I:%M:%S %p %m/%d/%Y")
+        date_only_str = dt.date().strftime("%m/%d/%Y")
+
+        return dt, date_only_str
+    except ValueError as e:
+        print(f"Error parsing datetime: {e}")
+        return None, None
+
+
+def calculate_pnl(
+    entry_prices, entry_shares, exit_prices, exit_shares, direction, ticker
+):
+    """Calculate P&L for a completed trade"""
+    # Convert all numbers to Decimal for consistent decimal arithmetic
+    total_entry_value = Decimal("0")
+    total_entry_shares = Decimal("0")
+    total_exit_value = Decimal("0")
+    total_exit_shares = Decimal("0")
+
+    # Calculate totals for entries
+    for price, shares in zip(entry_prices, entry_shares):
+        price = Decimal(str(price))
+        shares = Decimal(str(abs(shares)))  # Use absolute value for shares
+        total_entry_value += price * shares
+        total_entry_shares += shares
+
+    # Calculate totals for exits
+    for price, shares in zip(exit_prices, exit_shares):
+        price = Decimal(str(price))
+        shares = Decimal(str(abs(shares)))  # Use absolute value for shares
+        total_exit_value += price * shares
+        total_exit_shares += shares
+
+
+    # Calculate weighted average prices
+    avg_entry_price = (
+        total_entry_value / total_entry_shares
+        if total_entry_shares > 0
+        else Decimal("0")
+    )
+    avg_exit_price = (
+        total_exit_value / total_exit_shares if total_exit_shares > 0 else Decimal("0")
+    )
+
+    # Calculate P&L based on direction
+    if direction == "Long":
+        pnl = (avg_exit_price - avg_entry_price) * total_exit_shares
+    else:  # Short
+        pnl = (avg_entry_price - avg_exit_price) * total_exit_shares
+
+    # Check if it's an options trade (ticker contains 'C' or 'P' and is longer than 4 characters)
+    is_option = len(ticker) > 4 and ("C" in ticker or "P" in ticker)
+    if is_option:
+        pnl = pnl * Decimal("100")  # Multiply by 100 for options contracts
+        total_contracts = total_entry_shares + total_exit_shares
+
+        # Only apply commission if it's not a buy to close under $0.65
+        should_apply_commission = True
+        if direction == "Short" and avg_exit_price < Decimal("0.65"):
+            should_apply_commission = False
+
+        if should_apply_commission:
+            commission = Decimal("0.65") * total_contracts  # $0.65 per contract
+            pnl = pnl - commission
+
+    print("\ncalculated pnl: ", pnl)
+    return float(round(pnl, 2))
+
+
+def process_trades(conn, user_id: int):
+    """Process trade_executions into consolidated trades"""
+    try:
+        with conn.db.cursor() as cursor:
+            print("\nStarting process_trades", flush=True)
+            cursor.execute(
+                """
+                SELECT te.* 
+                FROM trade_executions te
+                WHERE te.userId = %s AND te.tradeId IS NULL
+                ORDER BY te.timestamp ASC
+            """,
+                (user_id,),
+            )
+
+            executions = cursor.fetchall()
+            print(f"\nFound {len(executions)} unprocessed executions", flush=True)
+
+            for execution in executions:
+                print(f"\nProcessing execution: {execution}", flush=True)
+                execution_id = execution[0]
+                ticker = execution[3]
+                securityId = execution[2]
+                trade_date = execution[4]
+                trade_price = float(execution[5])
+                trade_size = int(execution[6])
+                trade_ts = execution[7]
+                direction = execution[8]
+
+                cursor.execute(
+                    """
+                    SELECT * 
+                    FROM trades
+                    WHERE userId = %s
+                      AND ticker = %s
+                      AND status = 'Open'
+                    ORDER BY date DESC
+                    LIMIT 1
+                """,
+                    (user_id, ticker),
+                )
+
+                open_trade = cursor.fetchone()
+
+                if not open_trade:
+                    print("\nCreating new trade", flush=True)
+                    open_quantity = trade_size
+
+                    cursor.execute(
+                        """
+                        INSERT INTO trades (
+                            userId, securityId, ticker, tradedirection, date, status, openQuantity,
+                            entry_times, entry_prices, entry_shares,
+                            exit_times, exit_prices, exit_shares
+                        )
+                        VALUES (
+                            %s, %s, %s, %s, %s, 'Open', %s,
+                            ARRAY[%s], ARRAY[%s], ARRAY[%s],
+                            ARRAY[]::timestamp[], ARRAY[]::decimal(10,4)[], ARRAY[]::int[]
+                        )
+                        RETURNING tradeId
+                    """,
+                        (
+                            user_id,
+                            securityId,
+                            ticker,
+                            direction,
+                            trade_date,
+                            open_quantity,
+                            trade_ts,
+                            trade_price,
+                            trade_size,
+                        ),
+                    )
+
+                    new_trade_id = cursor.fetchone()[0]
+                    cursor.execute(
+                        """
+                        UPDATE trade_executions
+                        SET tradeId = %s
+                        WHERE executionId = %s
+                    """,
+                        (new_trade_id, execution_id),
+                    )
+
+                else:
+                    print("\nUpdating existing trade", flush=True)
+                    trade_id = open_trade[0]
+                    trade_dir = open_trade[4]
+                    old_open_qty = float(open_trade[7])
+                    new_open_qty = old_open_qty + trade_size
+                    print(
+                        f"\nTrade details - Direction: {trade_dir}, Old Qty: {old_open_qty}, New Qty: {new_open_qty}",
+                        flush=True,
+                    )
+
+                    if trade_dir == direction:
+                        is_same_direction = (old_open_qty > 0 and trade_size > 0) or (
+                            old_open_qty < 0 and trade_size < 0
+                        )
+                        print(
+                            f"\nSame direction check: {is_same_direction}", flush=True
+                        )
+
+                        if is_same_direction:
+                            print("\nAdding to position", flush=True)
+                            cursor.execute(
+                                """
+                                UPDATE trades
+                                SET entry_times = array_append(entry_times, %s),
+                                    entry_prices = array_append(entry_prices, %s),
+                                    entry_shares = array_append(entry_shares, %s),
+                                    openQuantity = %s
+                                WHERE tradeId = %s
+                            """,
+                                (
+                                    trade_ts,
+                                    trade_price,
+                                    trade_size,
+                                    new_open_qty,
+                                    trade_id,
+                                ),
+                            )
+                        else:
+                            print("\nReducing position (same direction)", flush=True)
+                            cursor.execute(
+                                """
+                                UPDATE trades
+                                SET exit_times = array_append(exit_times, %s),
+                                    exit_prices = array_append(exit_prices, %s),
+                                    exit_shares = array_append(exit_shares, %s),
+                                    openQuantity = %s,
+                                    status = CASE
+                                        WHEN %s = 0 THEN 'Closed'
+                                        ELSE 'Open'
+                                    END
+                                WHERE tradeId = %s
+                            """,
+                                (
+                                    trade_ts,
+                                    trade_price,
+                                    trade_size,
+                                    new_open_qty,
+                                    new_open_qty,
+                                    trade_id,
+                                ),
+                            )
+
+                            # Calculate and update P/L for partial exits
+                            cursor.execute(
+                                """
+                                SELECT entry_prices, entry_shares,
+                                       exit_prices, exit_shares,
+                                       tradedirection
+                                FROM trades
+                                WHERE tradeId = %s
+                            """,
+                                (trade_id,),
+                            )
+                            trade_data = cursor.fetchone()
+                            updated_pnl = calculate_pnl(
+                                trade_data[0],
+                                trade_data[1],
+                                trade_data[2],
+                                trade_data[3],
+                                trade_data[4],
+                                ticker,
+                            )
+                            cursor.execute(
+                                """
+                                UPDATE trades
+                                SET closedPnL = %s
+                                WHERE tradeId = %s
+                            """,
+                                (updated_pnl, trade_id),
+                            )
+
+                    else:
+                        print("\nReducing position (opposite direction)", flush=True)
+                        cursor.execute(
+                            """
+                            UPDATE trades
+                            SET exit_times = array_append(exit_times, %s),
+                                exit_prices = array_append(exit_prices, %s),
+                                exit_shares = array_append(exit_shares, %s),
+                                openQuantity = %s,
+                                status = CASE
+                                    WHEN %s = 0 THEN 'Closed'
+                                    ELSE 'Open'
+                                END
+                            WHERE tradeId = %s
+                        """,
+                            (
+                                trade_ts,
+                                trade_price,
+                                trade_size,
+                                new_open_qty,
+                                new_open_qty,
+                                trade_id,
+                            ),
+                        )
+
+                        # Calculate and update P/L for partial exits
+                        cursor.execute(
+                            """
+                            SELECT entry_prices, entry_shares,
+                                   exit_prices, exit_shares,
+                                   tradedirection
+                            FROM trades
+                            WHERE tradeId = %s
+                        """,
+                            (trade_id,),
+                        )
+                        trade_data = cursor.fetchone()
+                        updated_pnl = calculate_pnl(
+                            trade_data[0],
+                            trade_data[1],
+                            trade_data[2],
+                            trade_data[3],
+                            trade_data[4],
+                            ticker,
+                        )
+                        cursor.execute(
+                            """
+                            UPDATE trades
+                            SET closedPnL = %s
+                            WHERE tradeId = %s
+                        """,
+                            (updated_pnl, trade_id),
+                        )
+
+                    cursor.execute(
+                        """
+                        UPDATE trade_executions
+                        SET tradeId = %s
+                        WHERE executionId = %s
+                    """,
+                        (trade_id, execution_id),
+                    )
+
+            conn.db.commit()
+            print("\nAll trades processed successfully", flush=True)
+            return {"status": "success", "message": "Trades processed successfully"}
+
+    except Exception as e:
+        conn.db.rollback()
+        error_info = traceback.format_exc()
+        print(f"Error processing trades:\n{error_info}", flush=True)
+        return {
+            "status": "error",
+            "message": f"Error: {str(e)}\nTraceback:\n{error_info}",
+        }
+
+```
+
+```study/api.go
+<file>/home/aj/dev/study/services/backend/server/api.go</file>
+package server
+
+import (
+	"backend/jobs"
+	"backend/tasks"
+
+	"backend/socket"
+	"backend/utils"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+
+	"github.com/gorilla/websocket"
+)
+
+var publicFunc = map[string]func(*utils.Conn, json.RawMessage) (interface{}, error){
+	"signup":         Signup,
+	"login":          Login,
+	"googleLogin":    GoogleLogin,
+	"googleCallback": GoogleCallback,
+}
+
+var privateFunc = map[string]func(*utils.Conn, int, json.RawMessage) (interface{}, error){
+	"verifyAuth": verifyAuth,
+	//securities
+	"getSimilarInstances":     tasks.GetSimilarInstances,
+	"getSecuritiesFromTicker": tasks.GetSecuritiesFromTicker,
+	"getCurrentTicker":        tasks.GetCurrentTicker,
+	//"getTickerDetails":        tasks.GetTickerDetails,
+	"getTickerMenuDetails": tasks.GetTickerMenuDetails,
+	"getIcons":             tasks.GetIcons,
+
+	//chart
+	"getChartData": tasks.GetChartData,
+	//study
+	"getStudies": tasks.GetStudies,
+
+	"newStudy":      tasks.NewStudy,
+	"saveStudy":     tasks.SaveStudy,
+	"deleteStudy":   tasks.DeleteStudy,
+	"getStudyEntry": tasks.GetStudyEntry,
+	"completeStudy": tasks.CompleteStudy,
+	"setStudySetup": tasks.SetStudySetup,
+	//journal
+	"getJournals":     tasks.GetJournals,
+	"saveJournal":     tasks.SaveJournal,
+	"deleteJournal":   tasks.DeleteJournal,
+	"getJournalEntry": tasks.GetJournalEntry,
+	"completeJournal": tasks.CompleteJournal,
+	//screensaver
+	"getScreensavers": tasks.GetScreensavers,
+	//watchlist
+	"getWatchlists":       tasks.GetWatchlists,
+	"deleteWatchlist":     tasks.DeleteWatchlist,
+	"newWatchlist":        tasks.NewWatchlist,
+	"getWatchlistItems":   tasks.GetWatchlistItems,
+	"deleteWatchlistItem": tasks.DeleteWatchlistItem,
+	"newWatchlistItem":    tasks.NewWatchlistItem,
+	//singles
+	"getPrevClose": tasks.GetPrevClose,
+	//"getMarketCap": tasks.GetMarketCap,
+	//settings
+	"getSettings": tasks.GetSettings,
+	"setSettings": tasks.SetSettings,
+	//profile
+	"updateProfilePicture": UpdateProfilePicture,
+	//exchanges
+	"getExchanges": tasks.GetExchanges,
+	//setups
+	"getSetups":   tasks.GetSetups,
+	"newSetup":    tasks.NewSetup,
+	"setSetup":    tasks.SetSetup,
+	"deleteSetup": tasks.DeleteSetup,
+	//algos
+	//"getAlgos": tasks.GetAlgos,
+	//samples
+	"labelTrainingQueueInstance": tasks.LabelTrainingQueueInstance,
+	"getTrainingQueue":           tasks.GetTrainingQueue,
+	"setSample":                  tasks.SetSample,
+	//telegram
+	//	"sendMessage": telegram.SendMessage,
+	//alerts
+	"getAlerts":    tasks.GetAlerts,
+	"getAlertLogs": tasks.GetAlertLogs,
+	"newAlert":     tasks.NewAlert,
+	"deleteAlert":  tasks.DeleteAlert,
+	//"setAlert":tasks.SetAlert,
+
+	// deprecated
+	// "getTradeData":            tasks.GetTradeData,
+	//
+	//	"getLastTrade":            tasks.GetLastTrade,
+	//
+	// "getQuoteData":            tasks.GetQuoteData,
+	// "getSecurityDateBounds":   tasks.GetSecurityDateBounds,
+	"setHorizontalLine":    tasks.SetHorizontalLine,
+	"getHorizontalLines":   tasks.GetHorizontalLines,
+	"deleteHorizontalLine": tasks.DeleteHorizontalLine,
+	"updateHorizontalLine": tasks.UpdateHorizontalLine,
+	//active
+
+	"getActive": tasks.GetActive,
+	//sector, industry
+	"getSecurityClassifications": tasks.GetSecurityClassifications,
+	"getLatestEdgarFilings":      tasks.GetLatestEdgarFilings,
+	"getChartEvents":             tasks.GetChartEvents,
+}
+
+func verifyAuth(_ *utils.Conn, _ int, _ json.RawMessage) (interface{}, error) { return nil, nil }
+
+type Request struct {
+	Function  string          `json:"func"`
+	Arguments json.RawMessage `json:"args"`
+}
+
+func addCORSHeaders(w http.ResponseWriter) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
+	w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
+}
+
+func handleError(w http.ResponseWriter, err error, context string) bool {
+	if err != nil {
+		logMessage := fmt.Sprintf("%s: %v", context, err)
+		fmt.Println(logMessage)
+		if context == "auth" {
+			http.Error(w, logMessage, http.StatusUnauthorized)
+		} else {
+			http.Error(w, logMessage, http.StatusBadRequest)
+		}
+		return true
+	}
+	return false
+}
+
+func public_handler(conn *utils.Conn) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		addCORSHeaders(w)
+		if r.Method == "OPTIONS" {
+			return
+		}
+		//fmt.Println("debug: got public request")
+		var req Request
+		err := json.NewDecoder(r.Body).Decode(&req)
+		if handleError(w, err, "decoding request") {
+			return
+		}
+		fmt.Println(req.Function)
+		if function, ok := publicFunc[req.Function]; ok {
+			result, err := function(conn, req.Arguments)
+			if handleError(w, err, req.Function) {
+				return
+			}
+			if err := json.NewEncoder(w).Encode(result); err != nil {
+				handleError(w, err, "encoding response")
+				return
+			}
+			return
+		} else {
+			http.Error(w, fmt.Sprintf("invalid function: %s", req.Function), http.StatusBadRequest)
+			fmt.Printf("invalid function: %s", req.Function)
+			return
+		}
+	}
+}
+
+func private_upload_handler(conn *utils.Conn) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		addCORSHeaders(w)
+		if r.Method != "POST" {
+			return
+		}
+		token_string := r.Header.Get("Authorization")
+		userId, err := validate_token(token_string)
+		if handleError(w, err, "auth") {
+			return
+		}
+
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			handleError(w, err, "parsing multipart form")
+			return
+		}
+
+		// Get function name
+		funcName := r.FormValue("func")
+		if funcName == "" {
+			handleError(w, fmt.Errorf("missing function name"), "function name")
+			return
+		}
+
+		file, _, err := r.FormFile("file")
+		if err != nil {
+			handleError(w, err, "file")
+			return
+		}
+		defer file.Close()
+
+		fileContent, err := io.ReadAll(file)
+		if err != nil {
+			handleError(w, err, "reading file")
+			return
+		}
+		encodedContent := base64.StdEncoding.EncodeToString(fileContent)
+
+		// Parse additional arguments
+		var additionalArgs map[string]interface{}
+		if argsStr := r.FormValue("args"); argsStr != "" {
+			if err := json.Unmarshal([]byte(argsStr), &additionalArgs); err != nil {
+				handleError(w, err, "parsing additional arguments")
+				return
+			}
+		}
+
+		// Include userId in the arguments
+		args := map[string]interface{}{
+			"file_content":    encodedContent,
+			"additional_args": additionalArgs,
+			"user_id":         userId,
+		}
+
+		taskId, err := utils.Queue(conn, funcName, args)
+		if handleError(w, err, "queuing task") {
+			return
+		}
+
+		response := map[string]string{
+			"taskId": taskId,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			handleError(w, err, "encoding response")
+			return
+		}
+	}
+}
+
+func private_handler(conn *utils.Conn) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		addCORSHeaders(w)
+		if r.Method != "POST" {
+			return
+		}
+		//fmt.Println("debug: got private request")
+		token_string := r.Header.Get("Authorization")
+		user_id, err := validate_token(token_string)
+		if handleError(w, err, "auth") {
+			return
+		}
+		var req Request
+		if handleError(w, json.NewDecoder(r.Body).Decode(&req), "decoding request") {
+			return
+		}
+		//fmt.Printf("debug: %s\n", req.Function)
+
+		if function, ok := privateFunc[req.Function]; ok {
+			result, err := function(conn, user_id, req.Arguments)
+			if handleError(w, err, req.Function) {
+				return
+			}
+			if err := json.NewEncoder(w).Encode(result); err != nil {
+				handleError(w, err, "encoding response")
+				return
+			}
+		} else {
+			http.Error(w, fmt.Sprintf("invalid function: %s", req.Function), http.StatusBadRequest)
+			fmt.Printf("invalid function: %s", req.Function)
+			return
+		}
+	}
+}
+
+type QueueRequest struct {
+	Function  string      `json:"func"`
+	Arguments interface{} `json:"args"`
+}
+
+func queueHandler(conn *utils.Conn) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		addCORSHeaders(w)
+		if r.Method != "POST" {
+			return
+		}
+		fmt.Println("debug: got queue request")
+		token_string := r.Header.Get("Authorization")
+		userId, err := validate_token(token_string)
+		if handleError(w, err, "auth") {
+			return
+		}
+		var req Request
+		if handleError(w, json.NewDecoder(r.Body).Decode(&req), "decoding request") {
+			return
+		}
+
+		// Create a map for the combined arguments
+		var args map[string]interface{}
+
+		// If req.Arguments is not empty, unmarshal it into the args map
+		if len(req.Arguments) > 0 {
+			if err := json.Unmarshal(req.Arguments, &args); err != nil {
+				handleError(w, err, "parsing arguments")
+				return
+			}
+		} else {
+			// Initialize empty map if no arguments were provided
+			args = make(map[string]interface{})
+		}
+
+		// Add userId to the arguments
+		args["user_id"] = userId
+
+		taskId, err := utils.Queue(conn, req.Function, args)
+		if handleError(w, err, "queue") {
+			return
+		}
+		response := map[string]string{
+			"taskId": taskId,
+		}
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			handleError(w, err, "190v0id")
+			return
+		}
+	}
+}
+
+type PollRequest struct {
+	TaskId string `json:"taskId"`
+}
+
+func pollHandler(conn *utils.Conn) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		addCORSHeaders(w)
+		if r.Method != "POST" {
+			return
+		}
+		token_string := r.Header.Get("Authorization")
+		_, err := validate_token(token_string)
+		if handleError(w, err, "auth") {
+			return
+		}
+		var req PollRequest
+		if handleError(w, json.NewDecoder(r.Body).Decode(&req), "1m99c") {
+			return
+		}
+		result, err := utils.Poll(conn, req.TaskId)
+		if handleError(w, err, fmt.Sprintf("executing function %s", req.TaskId)) {
+			return
+		}
+		if err := json.NewEncoder(w).Encode(result); err != nil {
+			handleError(w, err, "19inv0id")
+			return
+		}
+	}
+}
+
+func WSHandler(conn *utils.Conn) http.HandlerFunc {
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool {
+			return true // Allow all origins
+		},
+	}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		addCORSHeaders(w)
+
+		// Extract the token from the query parameters
+		token := r.URL.Query().Get("token")
+		if token == "" {
+			http.Error(w, "Token is required", http.StatusBadRequest)
+			return
+		}
+
+		// Validate the token and extract the user ID
+		userID, err := validate_token(token)
+		if err != nil {
+			http.Error(w, "Invalid token", http.StatusUnauthorized)
+			return
+		}
+
+		// Upgrade the connection to a WebSocket
+		ws, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			fmt.Println("Failed to upgrade to WebSocket:", err)
+			return
+		}
+
+		// Call the slimmed-down version of WsHandler in socket.go
+		socket.HandleWebSocket(conn, ws, userID)
+	}
+}
+
+// Health check endpoint handler
+func healthHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Create a response object
+		response := map[string]string{
+			"status":  "healthy",
+			"service": "backend",
+		}
+
+		// Set content type header
+		w.Header().Set("Content-Type", "application/json")
+
+		// Write the response
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			log.Printf("Error encoding health response: %v", err)
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+		}
+	}
+}
+
+func StartServer() {
+	conn, cleanup := utils.InitConn(true)
+	defer cleanup()
+	stopScheduler := jobs.StartScheduler(conn)
+	defer close(stopScheduler)
+	http.HandleFunc("/public", public_handler(conn))
+	http.HandleFunc("/private", private_handler(conn))
+	http.HandleFunc("/queue", queueHandler(conn))
+	http.HandleFunc("/poll", pollHandler(conn))
+	http.HandleFunc("/ws", WSHandler(conn))
+	http.HandleFunc("/private-upload", private_upload_handler(conn))
+	http.HandleFunc("/health", healthHandler())
+	fmt.Println("debug: Server running on port 5057 ----------------------------------------------------------")
+	if err := http.ListenAndServe(":5057", nil); err != nil {
+		log.Fatal(err)
+	}
+}
+
+```
+
+```study/backend.ts
+<file>/home/aj/dev/study/services/frontend/src/lib/core/backend.ts</file>
+export let base_url: string;
+const pollInterval = 300; // Poll every 100ms
+import { goto } from '$app/navigation';
+
+// Default value for server-side rendering
+base_url = 'http://localhost:5057';
+
+if (typeof window !== 'undefined') {
+    // For client-side code
+    if (window.location.hostname === 'localhost') {
+        // In development
+        const url = new URL(window.location.origin);
+        url.port = '5057'; // Switch to backend port
+        base_url = url.toString();
+        if (base_url.endsWith('/')) {
+            base_url = base_url.substring(0, base_url.length - 1);
+        }
+        console.log('Using development backend URL:', base_url);
+    } else {
+        // In production always use the current origin
+        base_url = window.location.origin;
+        console.log('Using production backend URL:', base_url);
+    }
+}
+
+// For debugging
+console.log('Backend base_url set to:', base_url);
+
+export async function publicRequest<T>(func: string, args: Record<string, unknown>): Promise<T> {
+    // Log what's being sent
+    console.log(`Making ${func} request with args:`, args);
+
+    const payload = JSON.stringify({
+        func: func,
+        args: args
+    });
+    const response = await fetch(`${base_url}/public`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: payload
+    });
+    if (response.ok) {
+        const result = (await response.json()) as T;
+        console.log('payload: ', payload, 'result: ', result);
+        return result;
+    } else {
+        const errorMessage = await response.text();
+        console.error('payload: ', payload, 'error: ', errorMessage);
+        return Promise.reject(errorMessage);
+    }
+}
+
+export async function privateFileRequest<T>(
+    func: string,
+    file: File,
+    additionalArgs: object = {}
+): Promise<T> {
+    let authToken;
+    try {
+        authToken = sessionStorage.getItem('authToken');
+    } catch {
+        throw new Error('Failed to get auth token');
+    }
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('func', func);
+    formData.append('args', JSON.stringify(additionalArgs));
+
+    // Create headers object with optional authorization
+    const headers: HeadersInit = {};
+    if (authToken) {
+        headers['Authorization'] = authToken;
+    }
+
+    const response = await fetch(`${base_url}/private-upload`, {
+        method: 'POST',
+        headers,
+        body: formData
+    }).catch((e) => {
+        return Promise.reject(e);
+    });
+
+    if (response.status === 401) {
+        goto('/login');
+        throw new Error('Authentication failed');
+    }
+    if (!response.ok) {
+        const errorMessage = await response.text();
+        console.error('Error:', errorMessage);
+        return Promise.reject(errorMessage);
+    }
+
+    return response.json() as Promise<T>;
+}
+
+export async function privateRequest<T>(
+    func: string,
+    args: Record<string, unknown>,
+    verbose = false
+): Promise<T> {
+    // Skip API calls during SSR to prevent crashes
+    if (typeof window === 'undefined') {
+        console.log('Skipping API call during SSR for endpoint:', func);
+        return {} as T; // Return empty data during SSR
+    }
+
+    let authToken;
+    try {
+        authToken = sessionStorage.getItem('authToken');
+    } catch {
+        throw new Error('Failed to get auth token');
+    }
+    const headers = {
+        'Content-Type': 'application/json',
+        ...(authToken ? { Authorization: authToken } : {})
+    };
+    const payload = {
+        func: func,
+        args: args
+    };
+    const response = await fetch(`${base_url}/private`, {
+        method: 'POST',
+        headers: headers,
+        body: JSON.stringify(payload)
+    }).catch((e) => {
+        return Promise.reject(e);
+    });
+
+    if (response.status === 401) {
+        goto('/login');
+        throw new Error('Authentication failed');
+    } else if (response.ok) {
+        const result = (await response.json()) as T;
+        if (verbose) {
+            console.log('payload: ', payload, 'result: ', result);
+        }
+        return result;
+    } else {
+        const errorMessage = await response.text();
+        console.error('payload: ', payload, 'error: ', errorMessage);
+        return Promise.reject(errorMessage);
+    }
+}
+
+export async function queueRequest<T>(
+    func: string,
+    args: Record<string, unknown>,
+    verbose = true
+): Promise<T> {
+    let authToken;
+    try {
+        authToken = sessionStorage.getItem('authToken');
+        if (!authToken) {
+            throw new Error('No auth token found');
+        }
+    } catch (error) {
+        goto('/login');
+        throw new Error(
+            'Authentication failed: ' + (error instanceof Error ? error.message : 'Unknown error')
+        );
+    }
+
+    const headers = {
+        'Content-Type': 'application/json',
+        Authorization: authToken
+    };
+    const payload = {
+        func: func,
+        args: args
+    };
+    const response = await fetch(`${base_url}/queue`, {
+        method: 'POST',
+        headers: headers,
+        body: JSON.stringify(payload)
+    }).catch();
+
+    if (response.status === 401) {
+        goto('/login');
+    } else if (!response.ok) {
+        const errorMessage = await response.text();
+        console.error('Error queuing task:', errorMessage);
+        return Promise.reject(errorMessage);
+    }
+    if (verbose) {
+        console.log(payload);
+    }
+    const result = await response.json();
+    const taskId = result.taskId;
+    return new Promise<T>((resolve, reject) => {
+        const intervalID = setInterval(async () => {
+            const pollResponse = await fetch(`${base_url}/poll`, {
+                method: 'POST',
+                headers: headers,
+                body: JSON.stringify({ taskId: taskId })
+            }).catch();
+            if (!pollResponse.ok) {
+                const errorMessage = await pollResponse.text();
+                console.error('Error polling task:', errorMessage);
+                clearInterval(intervalID);
+                reject(errorMessage);
+                return;
+            }
+            const data = await pollResponse.json();
+            console.log(data);
+            if (data.status === 'completed') {
+                console.log('Task completed:', data.result);
+                clearInterval(intervalID); // Stop polling
+                resolve(data.result);
+            } else if (data.status === 'error') {
+                console.error('Task error:', data.error);
+                clearInterval(intervalID); // Stop polling
+                reject(data.error);
+            }
+        }, pollInterval);
+    });
+}
+
+```
+
+```study/queue.go
+<file>/home/aj/dev/study/services/backend/utils/queue.go</file>
+package utils
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+
+	"github.com/google/uuid"
+)
+
+func Poll(conn *Conn, taskId string) (json.RawMessage, error) {
+	task := conn.Cache.Get(context.Background(), taskId).Val()
+	if task == "" {
+		return nil, fmt.Errorf("weh3")
+	}
+	result := json.RawMessage([]byte(task)) //its already json and you dont care about its contents utnil frontend so just push the json
+	return result, nil
+}
+
+type QueueArgs struct {
+	ID   string      `json:"id"`
+	Func string      `json:"func"`
+	Args interface{} `json:"args"`
+}
+
+type queueResponse struct {
+	TaskId string `json:"taskId"`
+}
+
+func Queue(conn *Conn, funcName string, arguments interface{}) (string, error) {
+	id := uuid.New().String()
+	taskArgs := QueueArgs{
+		ID:   id,
+		Func: funcName,
+		Args: arguments,
+	}
+	serializedTask, err := json.Marshal(taskArgs)
+	if err != nil {
+		return "", err
+	}
+
+	if err := conn.Cache.LPush(context.Background(), "queue", serializedTask).Err(); err != nil {
+		return "", err
+	}
+	serializedStatus, err := json.Marshal("queued")
+	if err != nil {
+		return "", fmt.Errorf("error marshaling task status: %w", err)
+	}
+	if err := conn.Cache.Set(context.Background(), id, serializedStatus, 0).Err(); err != nil {
+		return "", fmt.Errorf("error setting task status: %w", err)
+	}
+	return id, nil
+}
+
+func CheckSampleQueue(conn *Conn, setupId int, addedSample bool) {
+	if addedSample {
+		// Update untrainedSamples and sampleSize if a new sample is added
+		_, err := conn.DB.Exec(context.Background(), `
+            UPDATE setups 
+            SET untrainedSamples = untrainedSamples + 1, 
+                sampleSize = sampleSize + 1
+            WHERE setupId = $1`, setupId)
+		if err != nil {
+			fmt.Printf("Error updating sample counts: %v\n", err)
+			return
+		}
+	}
+	checkModel(conn, setupId)
+
+	var queueLength int
+	err := conn.DB.QueryRow(context.Background(), `
+        SELECT COUNT(*) 
+        FROM samples 
+        WHERE setupId = $1 AND label IS NULL`, setupId).Scan(&queueLength)
+	if err != nil {
+		fmt.Printf("Error checking queue length: %v\n", err)
+		return
+	}
+	if queueLength < 30 {
+		queueRunningKey := fmt.Sprintf("%d_queue_running", setupId)
+		queueRunning := conn.Cache.Get(context.Background(), queueRunningKey).Val()
+		if queueRunning != "true" {
+			conn.Cache.Set(context.Background(), queueRunningKey, "true", 0)
+			_, err := Queue(conn, "refillTrainerQueue", map[string]interface{}{
+				"setupId": setupId,
+			})
+
+			if err != nil {
+				fmt.Printf("Error enqueuing refillQueue: %v\n", err)
+				conn.Cache.Del(context.Background(), queueRunningKey)
+				return
+			}
+			fmt.Printf("Enqueued refillQueue for setupId: %d\n", setupId)
+		}
+	}
+}
+
+func checkModel(conn *Conn, setupId int) {
+	var untrainedSamples int
+	var sampleSize int
+
+	// Retrieve untrainedSamples and sampleSize from the database
+	err := conn.DB.QueryRow(context.Background(), `
+        SELECT untrainedSamples, sampleSize
+        FROM setups
+        WHERE setupId = $1`, setupId).Scan(&untrainedSamples, &sampleSize)
+	if err != nil {
+
+		fmt.Printf("Error retrieving model info: %v\n", err)
+		return
+	}
+
+	// Check if untrained samples exceed 20 or a certain percentage of sampleSize
+	if untrainedSamples > 0 || float64(untrainedSamples)/float64(sampleSize) > 0.05 {
+		trainRunningKey := fmt.Sprintf("%d_train_running", setupId)
+		trainRunning := conn.Cache.Get(context.Background(), trainRunningKey).Val()
+
+		// Add "train" to the queue if not already running
+		if trainRunning != "true" {
+			conn.Cache.Set(context.Background(), trainRunningKey, "true", 0)
+			_, err := Queue(conn, "train", map[string]interface{}{
+				"setupId": setupId,
+			})
+			if err != nil {
+				fmt.Printf("Error enqueuing train task: %v\n", err)
+				conn.Cache.Del(context.Background(), trainRunningKey)
+				return
+			}
+			fmt.Printf("Enqueued train task for setupId: %d\n", setupId)
+		}
+	}
+}
+
+```
+
+```study/init.sql
+<file>/home/aj/dev/study/services/db/init.sql</file>
+--init.sql
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE TABLE users (
+    userId SERIAL PRIMARY KEY,
+    username VARCHAR(100) UNIQUE NOT NULL,
+    password VARCHAR(100) NOT NULL,
+    settings JSON,
+    email VARCHAR(255),
+    google_id VARCHAR(255),
+    profile_picture TEXT,
+    auth_type VARCHAR(20) DEFAULT 'password' -- 'password' for password-only auth, 'google' for Google-only auth, 'both' for users who can use either method
+);
+CREATE INDEX idxUsers ON users (username, password);
+CREATE INDEX idxUserAuthType ON users(auth_type);
+CREATE TABLE securities (
+    securityid SERIAL,
+    ticker varchar(10) not null,
+    figi varchar(12) not null,
+    name varchar(200),
+    market varchar(50),
+    locale varchar(50),
+    primary_exchange varchar(50),
+    active boolean DEFAULT true,
+    market_cap numeric,
+    description text,
+    logo text,
+    -- base64 encoded image
+    icon text,
+    -- base64 encoded image
+    share_class_shares_outstanding bigint,
+    sector varchar(100),
+    industry varchar(100),
+    minDate timestamp,
+    maxDate timestamp,
+    cik bigint,
+    unique (ticker, minDate),
+    unique (ticker, maxDate),
+    unique (securityid, minDate),
+    unique (securityid, maxDate)
+);
+CREATE INDEX trgm_idx_securities_ticker ON securities USING gin (ticker gin_trgm_ops);
+create index idxTickerDateRange on securities (ticker, minDate, maxDate);
+create table setups (
+    setupId serial primary key,
+    userId int references users(userId) on delete cascade,
+    name varchar(50) not null,
+    timeframe varchar(10) not null,
+    bars int not null,
+    threshold int not null,
+    modelVersion int not null default 0,
+    score int default 0,
+    sampleSize int default 0,
+    untrainedSamples int default 0,
+    dolvol float not null,
+    adr float not null,
+    mcap float not null,
+    unique (userId, name)
+);
+create index idxUserIdName on setups(userId, name);
+create table samples (
+    sampleId SERIAL PRIMARY KEY,
+    setupId serial references setups(setupId) on delete cascade,
+    securityId int,
+    -- references securities(securityId), -- not unique
+    timestamp timestamp not null,
+    label boolean,
+    unique (securityId, timestamp, setupId)
+);
+create index idxSetupId on samples(setupId);
+CREATE TABLE studies (
+    studyId serial primary key,
+    userId serial references users(userId) on delete cascade,
+    securityId int,
+    --references securities(securityId), --cant because not unique
+    setupId serial references setups(setupId),
+    --no action
+    timestamp timestamp not null,
+    completed boolean not null default false,
+    entry json,
+    unique(userId, securityId, timestamp, setupId)
+);
+create index idxUserIdCompleted on studies(userId, completed);
+CREATE TABLE journals (
+    journalId serial primary key,
+    userId serial references users(userId),
+    timestamp timestamp not null,
+    completed boolean not null default false,
+    entry json,
+    unique (timestamp, userId)
+);
+CREATE INDEX idxJournalIdUserId on journals(journalId, userId);
+CREATE INDEX idxTimestamp on journals(timestamp);
+CREATE TABLE watchlists (
+    watchlistId serial primary key,
+    userId serial references users(userId) on delete cascade,
+    watchlistName varchar(50) not null,
+    unique(watchlistName, userId)
+);
+CREATE INDEX idxWatchlistIdUserId on watchlists(watchlistId, userId);
+CREATE TABLE watchlistItems (
+    watchlistItemId serial primary key,
+    watchlistId serial references watchlists(watchlistId) on delete cascade,
+    securityId int,
+    --serial references securities(securityId) on delete cascade,
+    unique (watchlistId, securityId)
+);
+CREATE INDEX idxWatchlistId on watchlistItems(watchlistId);
+/*CREATE TABLE algos (
+ algoId serial primary key,
+ algoName VARCHAR(50) not null
+ );*/
+CREATE TABLE alerts (
+    alertId SERIAL PRIMARY KEY,
+    userId SERIAL REFERENCES users(userId) ON DELETE CASCADE,
+    active BOOLEAN NOT NULL DEFAULT false,
+    alertType VARCHAR(10) NOT NULL CHECK (alertType IN ('price', 'setup', 'algo')),
+    -- Restrict the allowed alert types
+    setupId INT REFERENCES setups(setupId) ON DELETE CASCADE,
+    --algoId INT REFERENCES algos(algoId) ON DELETE CASCADE,
+    algoId INT,
+    price DECIMAL(10, 4),
+    direction Boolean,
+    securityID INT,
+    CONSTRAINT chk_alert_price_or_setup CHECK (
+        (
+            alertType = 'price'
+            AND price IS NOT NULL
+            AND securityID IS NOT NULL
+            AND direction IS NOT NULL
+            AND algoId IS NULL
+            AND setupId IS NULL
+        )
+        OR (
+            alertType = 'setup'
+            AND setupId IS NOT NULL
+            AND algoId IS NULL
+            AND price IS NULL
+            AND securityID IS NULL
+        )
+        OR (
+            alertType = 'algo'
+            AND algoId IS NOT NULL
+            AND setupId IS NULL
+            AND price IS NULL
+        )
+    )
+);
+CREATE INDEX idxAlertByUserId on alerts(userId);
+CREATE TABLE alertLogs (
+    alertLogId serial primary key,
+    alertId serial references alerts(alertId) on delete cascade,
+    timestamp timestamp not null,
+    securityId INT,
+    --references sercurities
+    unique(alertId, timestamp, securityId)
+);
+CREATE INDEX idxAlertLogId on alertLogs(alertLogId);
+CREATE TABLE horizontal_lines (
+    id serial primary key,
+    userId serial references users(userId) on delete cascade,
+    securityId int,
+    --references securities(securityId),
+    price float not null,
+    color varchar(20) DEFAULT '#FFFFFF', -- Default to white
+    line_width int DEFAULT 1, -- Default to 1px
+    unique (userId, securityId, price)
+);
+CREATE TABLE trades (
+    tradeId SERIAL PRIMARY KEY,
+    userId INT REFERENCES users(userId) ON DELETE CASCADE,
+    securityId INT,
+    ticker VARCHAR(20) NOT NULL,
+    tradeDirection VARCHAR(10) NOT NULL,
+    date DATE NOT NULL,
+    status VARCHAR(10) NOT NULL CHECK (status IN ('Open', 'Closed')),
+    openQuantity INT,
+    closedPnL DECIMAL(10, 2),
+    -- Store up to 20 entries
+    entry_times TIMESTAMP [] DEFAULT ARRAY []::TIMESTAMP [],
+    entry_prices DECIMAL(10, 4) [] DEFAULT ARRAY []::DECIMAL(10, 4) [],
+    entry_shares INT [] DEFAULT ARRAY []::INT [],
+    -- Store up to 50 exits
+    exit_times TIMESTAMP [] DEFAULT ARRAY []::TIMESTAMP [],
+    exit_prices DECIMAL(10, 4) [] DEFAULT ARRAY []::DECIMAL(10, 4) [],
+    exit_shares INT [] DEFAULT ARRAY []::INT []
+);
+CREATE TABLE trade_executions (
+    executionId SERIAL PRIMARY KEY,
+    userId INT REFERENCES users(userId) ON DELETE CASCADE,
+    securityId INT,
+    ticker VARCHAR(20) NOT NULL,
+    date DATE NOT NULL,
+    price DECIMAL(10, 4) NOT NULL,
+    size INT NOT NULL,
+    timestamp TIMESTAMP NOT NULL,
+    direction VARCHAR(10) NOT NULL,
+    tradeId INT REFERENCES trades(tradeId)
+);
+CREATE INDEX idxUserIdSecurityIdPrice on horizontal_lines(userId, securityId, price);
+COPY securities(securityid, ticker, figi, minDate, maxDate)
+FROM '/docker-entrypoint-initdb.d/securities.csv' DELIMITER ',' CSV HEADER;
+INSERT INTO users (userId, username, password, auth_type)
+VALUES (0, 'user', 'pass', 'password');
+Insert into setups (
+        setupid,
+        userid,
+        name,
+        timeframe,
+        bars,
+        threshold,
+        dolvol,
+        adr,
+        mcap
+    )
+values (1, 0, 'ep', '1d', 30, 30, 5000000, 2.5, 0),
+    (2, 0, 'f', '1d', 60, 30, 5000000, 2.5, 0),
+    (3, 0, 'mr', '1d', 30, 30, 5000000, 2.5, 0),
+    (4, 0, 'nep', '1d', 30, 30, 5000000, 2.5, 0),
+    (5, 0, 'nf', '1d', 60, 30, 5000000, 2.5, 0),
+    (6, 0, 'np', '1d', 30, 30, 5000000, 2.5, 0),
+    (7, 0, 'p', '1d', 30, 30, 5000000, 2.5, 0);
+alter sequence setups_setupid_seq restart with 8;
+CREATE TEMP TABLE temp (
+    setupId INTEGER NOT NULL,
+    ticker VARCHAR(10) NOT NULL,
+    timestamp INTEGER NOT NULL,
+    label BOOLEAN
+);
+COPY temp(setupId, ticker, timestamp, label)
+FROM '/docker-entrypoint-initdb.d/samples.csv' WITH (FORMAT csv, HEADER true, DELIMITER ',');
+INSERT INTO samples (setupId, securityId, timestamp, label)
+SELECT ts.setupId,
+    sec.securityId,
+    TO_TIMESTAMP(ts.timestamp),
+    ts.label
+FROM temp ts
+    JOIN securities sec ON ts.ticker = sec.ticker
+WHERE (
+        sec.minDate <= TO_TIMESTAMP(ts.timestamp)
+        OR sec.minDate IS NULL
+    )
+    AND (
+        sec.maxDate > TO_TIMESTAMP(ts.timestamp)
+        OR sec.maxDate IS NULL
+    );
+CREATE UNIQUE INDEX idx_users_email ON users(email)
+WHERE email IS NOT NULL;
+```
 
 </potential_codebase_context>

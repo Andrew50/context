@@ -76,6 +76,43 @@ find_file_fuzzy() {
     local found_file=""
     local base_name=$(basename "$search_term")
     
+    # First try to find the exact path pattern (preserving directory structure)
+    # Try in current directory with the full path pattern
+    found_file=$(find . -type f -path "*${search_term}*" 2>/dev/null | grep -v "node_modules" | grep -v ".git" | head -1)
+    if [[ -n "$found_file" ]]; then
+        echo "$found_file"
+        return 0
+    fi
+    
+    # Try in parent directory with the full path pattern
+    found_file=$(find .. -maxdepth 3 -type f -path "*${search_term}*" 2>/dev/null | grep -v "node_modules" | grep -v ".git" | head -1)
+    if [[ -n "$found_file" ]]; then
+        echo "$found_file"
+        return 0
+    fi
+    
+    # Try in /home/aj/dev directory with the full path pattern
+    found_file=$(find /home/aj/dev -maxdepth 4 -type f -path "*${search_term}*" 2>/dev/null | grep -v "node_modules" | grep -v ".git" | head -1)
+    if [[ -n "$found_file" ]]; then
+        echo "$found_file"
+        return 0
+    fi
+    
+    # Try in study directory with the full path pattern
+    found_file=$(find /home/aj/dev/study -type f -path "*${search_term}*" 2>/dev/null | grep -v "node_modules" | grep -v ".git" | head -1)
+    if [[ -n "$found_file" ]]; then
+        echo "$found_file"
+        return 0
+    fi
+    
+    # Try in actions-runner directory with the full path pattern
+    found_file=$(find /home/aj/dev/actions-runner/_work/study/study -type f -path "*${search_term}*" 2>/dev/null | grep -v "node_modules" | grep -v ".git" | head -1)
+    if [[ -n "$found_file" ]]; then
+        echo "$found_file"
+        return 0
+    fi
+    
+    # If full path pattern doesn't work, fall back to the original implementation
     # Try parent directory (dev) first
     found_file=$(find .. -maxdepth 3 -type f -name "*${search_term}*" 2>/dev/null | grep -v "node_modules" | grep -v ".git" | head -1)
     if [[ -n "$found_file" ]]; then

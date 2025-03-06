@@ -1,9 +1,4 @@
-study/account.svelte
-study/worker.py
-study/trade_analysis.py
-study/trades.py
-study/trade_helpers.py
-study/api.go
-study/backend.ts
-study/queue.go
-study/init.sql
+popups/input.svelte
+src/routes/app/+page.svelte
+chart/chart.svelte
+chart/chartContainer.svelte
